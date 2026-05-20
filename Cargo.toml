@@ -1,0 +1,20 @@
+[package]
+name = "busyos"
+version = "0.1.0"
+authors = ["Maxmade <28571007+MaxMade@users.noreply.github.com>"]
+edition = "2024"
+
+[dependencies]
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+uefi = { version = "0.37.0", default-features = false }
+
+[build-dependencies]
+
+[features]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

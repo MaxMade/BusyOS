@@ -1,0 +1,19 @@
+[alias]
+build-amd64  = "build --target x86_64-unknown-uefi"
+
+[target.x86_64-unknown-uefi]
+rustflags = [
+  "-C", "code-model=kernel",
+  "-C", "force-frame-pointers=y",
+  "-C", "force-unwind-tables=n",
+  "-C", "no-redzone=y",
+  "-C", "panic=abort",
+  "-C", "relocation-model=pie",
+  "-C", "debuginfo=2",
+  "-Z", "dwarf-version=4",
+  "-C", "link-arg=/DEBUG:DWARF",
+]
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
