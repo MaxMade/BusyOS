@@ -7,7 +7,7 @@ edition = "2024"
 [dependencies]
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-uefi = { version = "0.37.0", default-features = false, features = ["panic_handler"] }
+uefi = { version = "0.37.0", default-features = false, features = ["alloc", "global_allocator", "panic_handler"] }
 
 [build-dependencies]
 
