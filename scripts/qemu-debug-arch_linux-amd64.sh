@@ -21,7 +21,10 @@ cp "$OVMF_PATH/OVMF_CODE.4m.fd" "$ESP_DIR/OVMF_CODE.fd"
 cp "$OVMF_PATH/OVMF_VARS.4m.fd" "$ESP_DIR/OVMF_VARS.fd"
 
 # Prepare UEFI OS Loader
-cp -- "$SCRIPT_DIR/../target/x86_64-unknown-uefi/debug/busyos.efi" "$BOOT_DIR/bootx64.efi"
+cp -- "$SCRIPT_DIR/../target/x86_64-unknown-uefi/debug/busyos_bootloader.efi" "$BOOT_DIR/bootx64.efi"
+
+# Prepare BUSYOS
+cp -- "$SCRIPT_DIR/../target/x86_64-unknown-none/debug/busyos" "$BOOT_DIR/busyos.elf"
 
 # Start tmux with QEMU+GDB
 tmux new-session -d -s busyos
