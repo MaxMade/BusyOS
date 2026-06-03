@@ -38,22 +38,16 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
     let Data::Enum(data) = &input.data else {
-        return syn::Error::new_spanned(
-            &input.ident,
-            "#[derive(Locking)] only supports enums",
-        )
-        .to_compile_error()
-        .into();
+        return syn::Error::new_spanned(&input.ident, "#[derive(Locking)] only supports enums")
+            .to_compile_error()
+            .into();
     };
 
     let variants: Vec<_> = data.variants.iter().map(|v| v.ident.clone()).collect();
     if variants.is_empty() {
-        return syn::Error::new_spanned(
-            &input.ident,
-            "enum needs at least one lock level",
-        )
-        .to_compile_error()
-        .into();
+        return syn::Error::new_spanned(&input.ident, "enum needs at least one lock level")
+            .to_compile_error()
+            .into();
     }
 
     // ------------------------------------------------------------------
@@ -485,7 +479,7 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
             }
 
             /// Returns a mutable reference to the underlying data.
-            /// 
+            ///
             /// Since this call borrows the Mutex mutably, no actual locking
             /// needs to take place – the mutable borrow statically guarantees
             /// no new locks can be acquired while this reference exists.
