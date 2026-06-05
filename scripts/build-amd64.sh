@@ -1,7 +1,9 @@
 #!/bin/env bash
 
 # Build kernel
-cargo build --target x86_64-unknown-none -p busyos
+echo "Building kernel..."
+cargo -Z unstable-options -C kernel build-amd64
 
 # Build loader
-cargo build --target x86_64-unknown-uefi -p busyos_bootloader
+echo "Building bootloader..."
+cargo -Z unstable-options -C bootloader build-amd64
