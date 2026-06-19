@@ -12,6 +12,8 @@ pub enum Errno {
     EFAULT = 14,
     /// Resource exists.
     EEXISTS = 17,
+    /// Invalid argument.
+    EINVAL,
 }
 
 impl Display for Errno {
@@ -20,6 +22,7 @@ impl Display for Errno {
             Errno::ENOMEM => write!(f, "cannot allocate memory"),
             Errno::EFAULT => write!(f, "bad address"),
             Errno::EEXISTS => write!(f, "resource exists"),
+            Errno::EINVAL => write!(f, "invalid argument"),
         }
     }
 }

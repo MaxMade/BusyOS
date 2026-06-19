@@ -1174,6 +1174,24 @@ pub struct PageTables<PFA: PageFrameAllocator> {
 }
 
 impl<PFA: PageFrameAllocator> PageTables<PFA> {
+    /// Checkes if a virtual address is canonical.
+    ///
+    /// For AMD64, the most significant 16 bits of any virtual address, bits 48
+    /// through 63, must be copies of bit 47. Otherwise, any access will raise
+    /// an exception.
+    #[inline]
+    pub fn is_canonical<T>(virt_addr: VirtualAddress<T>) -> bool {
+        if virt_addr.addr() <= 0x00007fffffffffff {
+            return true;
+        }
+
+        if virt_addr.addr() >= 0xffff800000000000 {
+            return true;
+        }
+
+        false
+    }
+
     /// Creates an uninitialized set of page tables.
     ///
     /// The page table is inactive until a PML4 is allocated (on the first
@@ -1400,6 +1418,11 @@ impl<PFA: PageFrameAllocator> Paging<PFA> for PageTables<PFA> {
         Token: CanAcquire<level::MemoryManagement> + PreviousToken,
     {
         let mut token = token;
+
+        // Check if virtual address is canonical
+        if !Self::is_canonical(virtual_address) {
+            return Err((PagingError::InvalidAddress, token));
+        }
 
         // Frames allocated during this call, tracked for rollback on failure.
         let mut pml4_phys_allocated: Option<PhysicalAddress<PML4>> = None;
@@ -1692,6 +1715,11 @@ impl<PFA: PageFrameAllocator> Paging<PFA> for PageTables<PFA> {
     {
         let mut token = token;
 
+        // Check if virtual address is canonical
+        if !Self::is_canonical(virtual_address) {
+            return Err((PagingError::InvalidAddress, token));
+        }
+
         //
         // Resolve the PML4 root.
         //
@@ -1854,6 +1882,11 @@ impl<PFA: PageFrameAllocator> Paging<PFA> for PageTables<PFA> {
         &self,
         virtual_address: VirtualAddress<T>,
     ) -> Result<(PhysicalAddress<T>, PrivilegeLevel, AccessRights, PageSize), PagingError> {
+        // Check if virtual address is canonical
+        if !Self::is_canonical(virtual_address) {
+            return Err(PagingError::InvalidAddress);
+        }
+
         //
         // Resolve the PML4 root.
         //
@@ -2033,10 +2066,6 @@ mod test {
     impl TestPageFrameAllocator {
         fn virt_to_phys<T>(virt_addr: VirtualAddress<T>) -> PhysicalAddress<T> {
             PhysicalAddress::new((virt_addr.addr() - VIRT_PHYS_SHIFT) as _)
-        }
-
-        fn phys_to_virt<T>(phys_addr: PhysicalAddress<T>) -> VirtualAddress<T> {
-            VirtualAddress::new((phys_addr.addr() + VIRT_PHYS_SHIFT) as _)
         }
 
         fn leaked() -> bool {
@@ -2231,6 +2260,999 @@ mod test {
         syscall_level.leave(token);
 
         // Check if no page frames were leaked
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn map_resolve_2m() {
+        // Enter syscall level
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        // Track page frames
+        let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
+
+        // Map 2M page
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let src_virt_addr = TestPageFrameAllocator::next_virtual_addr(PageSize::Huge);
+        let dst_phys_addr = TestPageFrameAllocator::virt_to_phys(src_virt_addr);
+
+        let token = match unsafe {
+            paging.map(
+                src_virt_addr,
+                dst_phys_addr,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Huge,
+                token,
+            )
+        } {
+            Ok((prev, token)) => {
+                assert!(prev.is_none());
+                token
+            }
+            Err((error, _token)) => panic!("Unexpected error during mapping: {}", error),
+        };
+        page_frames.insert(dst_phys_addr, PageSize::Huge);
+
+        // Resolve mapping
+        match paging.resolve(src_virt_addr) {
+            Ok((phys_addr, priv_level, access_rights, page_size)) => {
+                assert!(
+                    phys_addr == dst_phys_addr,
+                    "Expected: {:?}, got: {:?}",
+                    dst_phys_addr,
+                    phys_addr
+                );
+                assert!(
+                    priv_level == PrivilegeLevel::User,
+                    "Expected: {}, got: {}",
+                    PrivilegeLevel::User,
+                    priv_level
+                );
+                assert!(
+                    access_rights == AccessRights::full(),
+                    "Expected: {}, got: {}",
+                    AccessRights::full(),
+                    access_rights
+                );
+                assert!(
+                    page_size == PageSize::Huge,
+                    "Expected: {}, got: {}",
+                    PageSize::Huge,
+                    page_size
+                );
+            }
+            Err(error) => panic!("Unexpected error during resolving: {}", error),
+        };
+
+        // Perform clean up
+        let pf_cb = |phys_addr, page_size, token| {
+            let prev = page_frames.remove(&phys_addr);
+            assert!(
+                prev == Some(page_size),
+                "Expected: {:?}, got: {:?}",
+                prev,
+                Some(page_size)
+            );
+            token
+        };
+        let token = unsafe { paging.destroy(pf_cb, token) };
+
+        // Leave syscall level
+        syscall_level.leave(token);
+
+        // Check if no page frames were leaked
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn map_resolve_1g() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        let src_virt_addr = TestPageFrameAllocator::next_virtual_addr(PageSize::Gigantic);
+        let dst_phys_addr = TestPageFrameAllocator::virt_to_phys(src_virt_addr);
+
+        let token = match unsafe {
+            paging.map(
+                src_virt_addr,
+                dst_phys_addr,
+                PrivilegeLevel::Kernel,
+                AccessRights::full(),
+                PageSize::Gigantic,
+                token,
+            )
+        } {
+            Ok((prev, token)) => {
+                assert!(prev.is_none());
+                token
+            }
+            Err((error, _token)) => panic!("Unexpected error during mapping: {}", error),
+        };
+        page_frames.insert(dst_phys_addr, PageSize::Gigantic);
+
+        match paging.resolve(src_virt_addr) {
+            Ok((phys_addr, priv_level, access_rights, page_size)) => {
+                assert_eq!(phys_addr, dst_phys_addr);
+                assert_eq!(priv_level, PrivilegeLevel::Kernel);
+                assert_eq!(access_rights, AccessRights::full());
+                assert_eq!(page_size, PageSize::Gigantic);
+            }
+            Err(error) => panic!("Unexpected error during resolving: {}", error),
+        }
+
+        let pf_cb = |phys_addr, page_size, token| {
+            let prev = page_frames.remove(&phys_addr);
+            assert_eq!(prev, Some(page_size));
+            token
+        };
+        let token = unsafe { paging.destroy(pf_cb, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn resolve_empty() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let addr = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+
+        match paging.resolve(addr) {
+            Err(PagingError::NotMapped) => {}
+            other => panic!("Expected NotMapped, got {:?}", other),
+        }
+
+        // destroy an empty hierarchy (no PML4 allocated yet)
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn resolve_unmapped_address() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        // Map one page so the PML4 is populated.
+        let mapped_virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let mapped_phys = TestPageFrameAllocator::virt_to_phys(mapped_virt);
+        let token = match unsafe {
+            paging.map(
+                mapped_virt,
+                mapped_phys,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        // A completely different, never-mapped virtual address.
+        let unmapped_virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        match paging.resolve(unmapped_virt) {
+            Err(PagingError::NotMapped) => {}
+            other => panic!("Expected NotMapped, got {:?}", other),
+        }
+
+        let token = unsafe {
+            paging.destroy(
+                |_, _, t| t, // leaf frames were never tracked; ignore them for this check
+                token,
+            )
+        };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn map_unmap_4k() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let phys = TestPageFrameAllocator::virt_to_phys(virt);
+
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        // unmap
+        let token = match unsafe { paging.unmap(virt, token) } {
+            Ok((returned_phys, page_size, t)) => {
+                assert_eq!(returned_phys, phys);
+                assert_eq!(page_size, PageSize::Regular);
+                t
+            }
+            Err((e, _)) => panic!("Unexpected error during unmap: {}", e),
+        };
+
+        // should no longer resolve
+        match paging.resolve(virt) {
+            Err(PagingError::NotMapped) => {}
+            other => panic!("Expected NotMapped after unmap, got {:?}", other),
+        }
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn map_unmap_2m() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Huge);
+        let phys = TestPageFrameAllocator::virt_to_phys(virt);
+
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Huge,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        let token = match unsafe { paging.unmap(virt, token) } {
+            Ok((returned_phys, page_size, t)) => {
+                assert_eq!(returned_phys, phys);
+                assert_eq!(page_size, PageSize::Huge);
+                t
+            }
+            Err((e, _)) => panic!("Unexpected error during unmap: {}", e),
+        };
+
+        match paging.resolve(virt) {
+            Err(PagingError::NotMapped) => {}
+            other => panic!("Expected NotMapped after unmap, got {:?}", other),
+        }
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn map_unmap_1g() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Gigantic);
+        let phys = TestPageFrameAllocator::virt_to_phys(virt);
+
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys,
+                PrivilegeLevel::Kernel,
+                AccessRights::full(),
+                PageSize::Gigantic,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        let token = match unsafe { paging.unmap(virt, token) } {
+            Ok((returned_phys, page_size, t)) => {
+                assert_eq!(returned_phys, phys);
+                assert_eq!(page_size, PageSize::Gigantic);
+                t
+            }
+            Err((e, _)) => panic!("Unexpected error during unmap: {}", e),
+        };
+
+        match paging.resolve(virt) {
+            Err(PagingError::NotMapped) => {}
+            other => panic!("Expected NotMapped after unmap, got {:?}", other),
+        }
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn unmap_not_mapped() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        // Map one page so there is a PML4, but try to unmap a different address.
+        let virt_a = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let phys_a = TestPageFrameAllocator::virt_to_phys(virt_a);
+        let token = match unsafe {
+            paging.map(
+                virt_a,
+                phys_a,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        let virt_b = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        match unsafe { paging.unmap(virt_b, token) } {
+            Err((PagingError::NotMapped, t)) => {
+                let token = unsafe { paging.destroy(|_, _, t| t, t) };
+                syscall_level.leave(token);
+            }
+            Ok(_) => panic!("Expected NotMapped, got Ok"),
+            Err((e, _)) => panic!("Expected NotMapped, got {}", e),
+        }
+
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn conflict_regular_then_gigantic() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        // Map a 4 KiB page; this allocates PML4 → PDP → PD → PT.
+        let virt_4k = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let phys_4k = TestPageFrameAllocator::virt_to_phys(virt_4k);
+        let token = match unsafe {
+            paging.map(
+                virt_4k,
+                phys_4k,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        // Now request a gigantic page that aliases the same PDP entry.
+        // The PDP entry already points to a PD table, so this must conflict.
+        let phys_1g = TestPageFrameAllocator::virt_to_phys(virt_4k); // reuse address; alignment doesn't matter here
+        match unsafe {
+            paging.map(
+                virt_4k,
+                phys_1g,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Gigantic,
+                token,
+            )
+        } {
+            Err((PagingError::Conflict, t)) => {
+                let token = unsafe { paging.destroy(|_, _, t| t, t) };
+                syscall_level.leave(token);
+            }
+            Ok(_) => panic!("Expected Conflict, got Ok"),
+            Err((e, _)) => panic!("Expected Conflict, got {}", e),
+        }
+
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn conflict_huge_then_regular() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        let virt_2m = TestPageFrameAllocator::next_virtual_addr(PageSize::Huge);
+        let phys_2m = TestPageFrameAllocator::virt_to_phys(virt_2m);
+        let token = match unsafe {
+            paging.map(
+                virt_2m,
+                phys_2m,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Huge,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        // Try to place a 4 KiB page inside the same 2 MiB slot.
+        let phys_4k = phys_2m;
+        match unsafe {
+            paging.map(
+                virt_2m,
+                phys_4k,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Err((PagingError::Conflict, t)) => {
+                let token = unsafe { paging.destroy(|_, _, t| t, t) };
+                syscall_level.leave(token);
+            }
+            Ok(_) => panic!("Expected Conflict, got Ok"),
+            Err((e, _)) => panic!("Expected Conflict, got {}", e),
+        }
+
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn remap_4k_returns_old_frame() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let phys_a = TestPageFrameAllocator::virt_to_phys(virt);
+        let phys_b = TestPageFrameAllocator::virt_to_phys(
+            TestPageFrameAllocator::next_virtual_addr(PageSize::Regular),
+        );
+
+        // First mapping.
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys_a,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((prev, t)) => {
+                assert!(prev.is_none(), "Expected no previous mapping");
+                t
+            }
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        // Second mapping at the same virtual address.
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys_b,
+                PrivilegeLevel::Kernel,
+                AccessRights::full(),
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((prev, t)) => {
+                let (old_phys, old_size) = prev.expect("Expected previous mapping to be returned");
+                assert_eq!(old_phys, phys_a);
+                assert_eq!(old_size, PageSize::Regular);
+                t
+            }
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        // The new mapping resolves to phys_b with Kernel privilege.
+        match paging.resolve(virt) {
+            Ok((phys, priv_level, _, size)) => {
+                assert_eq!(phys, phys_b);
+                assert_eq!(priv_level, PrivilegeLevel::Kernel);
+                assert_eq!(size, PageSize::Regular);
+            }
+            Err(e) => panic!("{}", e),
+        }
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn remap_2m_returns_old_frame() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Huge);
+        let phys_a = TestPageFrameAllocator::virt_to_phys(virt);
+        let phys_b = TestPageFrameAllocator::virt_to_phys(
+            TestPageFrameAllocator::next_virtual_addr(PageSize::Huge),
+        );
+
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys_a,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Huge,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys_b,
+                PrivilegeLevel::Kernel,
+                AccessRights::full(),
+                PageSize::Huge,
+                token,
+            )
+        } {
+            Ok((prev, t)) => {
+                let (old_phys, old_size) = prev.expect("Expected previous mapping");
+                assert_eq!(old_phys, phys_a);
+                assert_eq!(old_size, PageSize::Huge);
+                t
+            }
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn access_rights_read_only_kernel() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let phys = TestPageFrameAllocator::virt_to_phys(virt);
+
+        let ro = AccessRights::custom(true, false, false); // readable, not writable, not executable
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys,
+                PrivilegeLevel::Kernel,
+                ro,
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        match paging.resolve(virt) {
+            Ok((_, priv_level, access_rights, _)) => {
+                assert_eq!(priv_level, PrivilegeLevel::Kernel);
+                assert!(access_rights.is_readable());
+                assert!(!access_rights.is_writable());
+                assert!(!access_rights.is_executable());
+            }
+            Err(e) => panic!("{}", e),
+        }
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn access_rights_executable_user() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let phys = TestPageFrameAllocator::virt_to_phys(virt);
+
+        let rx = AccessRights::custom(true, false, true); // readable + executable
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys,
+                PrivilegeLevel::User,
+                rx,
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        match paging.resolve(virt) {
+            Ok((_, priv_level, access_rights, _)) => {
+                assert_eq!(priv_level, PrivilegeLevel::User);
+                assert!(access_rights.is_readable());
+                assert!(!access_rights.is_writable());
+                assert!(access_rights.is_executable());
+            }
+            Err(e) => panic!("{}", e),
+        }
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn multiple_4k_mappings() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut token = token;
+
+        const N: usize = 8;
+        let mut virts = Vec::with_capacity(N);
+        let mut physs = Vec::with_capacity(N);
+
+        // Map N pages.
+        for _ in 0..N {
+            let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+            let phys = TestPageFrameAllocator::virt_to_phys(virt);
+            token = match unsafe {
+                paging.map(
+                    virt,
+                    phys,
+                    PrivilegeLevel::User,
+                    AccessRights::full(),
+                    PageSize::Regular,
+                    token,
+                )
+            } {
+                Ok((_, t)) => t,
+                Err((e, _)) => panic!("{}", e),
+            };
+            virts.push(virt);
+            physs.push(phys);
+        }
+
+        // Resolve each.
+        for i in 0..N {
+            match paging.resolve(virts[i]) {
+                Ok((phys, _, _, size)) => {
+                    assert_eq!(phys, physs[i]);
+                    assert_eq!(size, PageSize::Regular);
+                }
+                Err(e) => panic!("resolve failed for mapping {}: {}", i, e),
+            }
+        }
+
+        // Unmap each and verify the others are still present.
+        for i in 0..N {
+            token = match unsafe { paging.unmap(virts[i], token) } {
+                Ok((phys, size, t)) => {
+                    assert_eq!(phys, physs[i]);
+                    assert_eq!(size, PageSize::Regular);
+                    t
+                }
+                Err((e, _)) => panic!("unmap failed for mapping {}: {}", i, e),
+            };
+
+            // The unmapped address must no longer resolve.
+            match paging.resolve(virts[i]) {
+                Err(PagingError::NotMapped) => {}
+                other => panic!("Expected NotMapped after unmap {}, got {:?}", i, other),
+            }
+
+            // All subsequent addresses must still resolve.
+            for j in (i + 1)..N {
+                match paging.resolve(virts[j]) {
+                    Ok((phys, _, _, _)) => assert_eq!(phys, physs[j]),
+                    Err(e) => panic!(
+                        "resolve unexpectedly failed for mapping {} after unmap {}: {}",
+                        j, i, e
+                    ),
+                }
+            }
+        }
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn mixed_page_sizes() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        let virt_1g = TestPageFrameAllocator::next_virtual_addr(PageSize::Gigantic);
+        let phys_1g = TestPageFrameAllocator::virt_to_phys(virt_1g);
+
+        let virt_2m = TestPageFrameAllocator::next_virtual_addr(PageSize::Huge);
+        let phys_2m = TestPageFrameAllocator::virt_to_phys(virt_2m);
+
+        let virt_4k = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let phys_4k = TestPageFrameAllocator::virt_to_phys(virt_4k);
+
+        let mut token = token;
+
+        for (v, p, size) in [
+            (virt_1g, phys_1g, PageSize::Gigantic),
+            (virt_2m, phys_2m, PageSize::Huge),
+            (virt_4k, phys_4k, PageSize::Regular),
+        ] {
+            token = match unsafe {
+                paging.map(
+                    v,
+                    p,
+                    PrivilegeLevel::Kernel,
+                    AccessRights::full(),
+                    size,
+                    token,
+                )
+            } {
+                Ok((_, t)) => t,
+                Err((e, _)) => panic!("map failed ({:?}): {}", size, e),
+            };
+            page_frames.insert(p, size);
+        }
+
+        // Verify each resolves correctly.
+        assert_eq!(paging.resolve(virt_1g).unwrap().3, PageSize::Gigantic);
+        assert_eq!(paging.resolve(virt_2m).unwrap().3, PageSize::Huge);
+        assert_eq!(paging.resolve(virt_4k).unwrap().3, PageSize::Regular);
+
+        let pf_cb = |phys_addr, page_size, token| {
+            let prev = page_frames.remove(&phys_addr);
+            assert_eq!(
+                prev,
+                Some(page_size),
+                "unexpected frame in destroy callback"
+            );
+            token
+        };
+        let token = unsafe { paging.destroy(pf_cb, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn double_unmap_returns_not_mapped() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let phys = TestPageFrameAllocator::virt_to_phys(virt);
+
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys,
+                PrivilegeLevel::User,
+                AccessRights::full(),
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        // First unmap succeeds.
+        let token = match unsafe { paging.unmap(virt, token) } {
+            Ok((_, _, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        // Second unmap must return NotMapped.
+        match unsafe { paging.unmap(virt, token) } {
+            Err((PagingError::NotMapped, t)) => {
+                let token = unsafe { paging.destroy(|_, _, t| t, t) };
+                syscall_level.leave(token);
+            }
+            Ok(_) => panic!("Expected NotMapped on second unmap, got Ok"),
+            Err((e, _)) => panic!("Expected NotMapped, got {}", e),
+        }
+
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn destroy_invokes_callback_for_each_leaf() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut token = token;
+
+        const N: usize = 4;
+        let mut expected: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
+
+        for _ in 0..N {
+            let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+            let phys = TestPageFrameAllocator::virt_to_phys(virt);
+            token = match unsafe {
+                paging.map(
+                    virt,
+                    phys,
+                    PrivilegeLevel::User,
+                    AccessRights::full(),
+                    PageSize::Regular,
+                    token,
+                )
+            } {
+                Ok((_, t)) => t,
+                Err((e, _)) => panic!("{}", e),
+            };
+            expected.insert(phys, PageSize::Regular);
+        }
+
+        // destroy must call back exactly once per leaf frame.
+        let mut seen: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
+        let pf_cb = |phys_addr: PhysicalAddress<c_void>, page_size, token| {
+            let prev = seen.insert(phys_addr, page_size);
+            assert!(
+                prev.is_none(),
+                "destroy callback invoked twice for {:p}",
+                phys_addr
+            );
+            token
+        };
+        let token = unsafe { paging.destroy(pf_cb, token) };
+
+        assert_eq!(
+            seen, expected,
+            "destroy callback set differs from mapped frames"
+        );
+
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn privilege_level_kernel() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let phys = TestPageFrameAllocator::virt_to_phys(virt);
+
+        let token = match unsafe {
+            paging.map(
+                virt,
+                phys,
+                PrivilegeLevel::Kernel,
+                AccessRights::full(),
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((_, t)) => t,
+            Err((e, _)) => panic!("{}", e),
+        };
+
+        match paging.resolve(virt) {
+            Ok((_, priv_level, _, _)) => assert_eq!(priv_level, PrivilegeLevel::Kernel),
+            Err(e) => panic!("{}", e),
+        }
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn map_non_canonical() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        let token = match unsafe {
+            paging.map(
+                VirtualAddress::<usize>::new(0x01007ffffffff000usize as _),
+                PhysicalAddress::<usize>::new(0x00007ffffffff000usize as _),
+                PrivilegeLevel::Kernel,
+                AccessRights::full(),
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Err((PagingError::InvalidAddress, token)) => {
+                /* Expected behaviour */
+                token
+            }
+            Ok((_, _)) => panic!("A non-canonical address must never be mapped!"),
+            Err((error, _)) => panic!(
+                "Unexpected error while mapping non-canonical address: {}",
+                error
+            ),
+        };
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn unmap_non_canonical() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        let token = match unsafe {
+            paging.unmap(
+                VirtualAddress::<usize>::new(0x01007ffffffff000usize as _),
+                token,
+            )
+        } {
+            Err((PagingError::InvalidAddress, token)) => {
+                /* Expected behaviour */
+                token
+            }
+            Ok(_) => panic!("A non-canonical address must never be mapped!"),
+            Err((error, _)) => panic!(
+                "Unexpected error while un-mapping non-canonical address: {}",
+                error
+            ),
+        };
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    #[test]
+    fn resolve_non_canonical() {
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        let paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+
+        match paging.resolve(VirtualAddress::<usize>::new(0x01007ffffffff000usize as _)) {
+            Err(PagingError::InvalidAddress) => { /* Expected behaviour */ }
+            Ok(_) => panic!("A non-canonical address must never be mapped!"),
+            Err(error) => panic!(
+                "Unexpected error while un-mapping non-canonical address: {}",
+                error
+            ),
+        };
+
+        let token = unsafe { paging.destroy(|_, _, t| t, token) };
+        syscall_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 }

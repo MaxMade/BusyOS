@@ -250,6 +250,8 @@ pub enum Error {
     NotMapped,
     /// For the requested virtual address a conflict exists, e.g., trying to map a huge page which would overwrite a page table.
     Conflict,
+    /// For invalid address format, e.g., non-canonical addresses
+    InvalidAddress,
 }
 
 impl Display for Error {
@@ -258,6 +260,7 @@ impl Display for Error {
             Error::OutOfMemory => write!(f, "out of memory"),
             Error::NotMapped => write!(f, "no mapping"),
             Error::Conflict => write!(f, "conflict"),
+            Error::InvalidAddress => write!(f, "invalid address"),
         }
     }
 }
@@ -268,6 +271,7 @@ impl ToErrno for Error {
             Error::OutOfMemory => Errno::ENOMEM,
             Error::NotMapped => Errno::EFAULT,
             Error::Conflict => Errno::EEXISTS,
+            Error::InvalidAddress => Errno::EINVAL,
         }
     }
 }
