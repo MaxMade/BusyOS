@@ -64,3 +64,59 @@ impl Drop for EpilogueLevel {
         );
     }
 }
+
+#[lock_id(MemoryManagement)]
+pub struct MemoryManagementLevelID;
+
+pub struct MemoryManagementLevel;
+
+impl MemoryManagementLevel {
+    pub fn enter(
+        root_token: RootToken,
+    ) -> (Self, Token<MemoryManagementLevelID, RootToken, Shared>) {
+        core::mem::forget(root_token);
+
+        let token = unsafe { Token::forge() };
+        (Self, token)
+    }
+
+    pub fn leave(self, token: Token<MemoryManagementLevelID, RootToken, Shared>) {
+        core::mem::forget(self);
+        core::mem::forget(token);
+    }
+}
+
+impl Drop for MemoryManagementLevel {
+    fn drop(&mut self) {
+        panic!(
+            "MemoryManagement level must never be left implicitly! Use MemoryManagementLevel::leave(...) instead!"
+        );
+    }
+}
+
+#[lock_id(Prologue)]
+pub struct PrologueLevelID;
+
+pub struct PrologueLevel;
+
+impl PrologueLevel {
+    pub fn enter(root_token: RootToken) -> (Self, Token<PrologueLevelID, RootToken, Shared>) {
+        core::mem::forget(root_token);
+
+        let token = unsafe { Token::forge() };
+        (Self, token)
+    }
+
+    pub fn leave(self, token: Token<PrologueLevelID, RootToken, Shared>) {
+        core::mem::forget(self);
+        core::mem::forget(token);
+    }
+}
+
+impl Drop for PrologueLevel {
+    fn drop(&mut self) {
+        panic!(
+            "Prologue level must never be left implicitly! Use PrologueLevel::leave(...) instead!"
+        );
+    }
+}
