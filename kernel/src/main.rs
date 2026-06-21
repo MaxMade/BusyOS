@@ -4,6 +4,7 @@
 pub mod arch;
 pub mod kernel;
 pub mod user;
+pub mod utils;
 
 #[cfg(test)]
 fn main() {
