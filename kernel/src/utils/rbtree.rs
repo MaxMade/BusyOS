@@ -214,6 +214,30 @@ impl<K: Ord, V, ID: LockId, A: Allocator<ID>> RbTree<K, V, ID, A> {
         None
     }
 
+    /// Searches for an key-value pair that satisfies a `callback`.
+    ///
+    /// The comparator function should return an order code that indicates
+    /// whether the desired target is `Less`, `Equal` or `Greater` the argument.
+    pub fn find<Q, CB>(&self, cb: CB) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+        CB: FnMut(&Q) -> Ordering,
+    {
+        let mut cb = cb;
+        let mut cur = self.root;
+        while let Some(n) = cur {
+            // SAFETY: `n` is a live node owned by the tree.
+            let node = unsafe { n.as_ref() };
+            cur = match cb(node.key.borrow()) {
+                Ordering::Less => node.left,
+                Ordering::Greater => node.right,
+                Ordering::Equal => return Some((&node.key, &node.value)),
+            };
+        }
+        None
+    }
+
     /// Returns a shared reference to the value for `key`, or `None` if absent.
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
     where
@@ -1311,5 +1335,969 @@ mod test {
         drop(t);
 
         epilogue_level.leave(token);
+    }
+}
+
+pub mod set {
+    //! An ordered set backed by a red-black tree.
+    //!
+    //! [`RbTreeSet`] mirrors the standard library's `BTreeSet` API for `no_std`
+    //! environments, wrapping [`RbTree<T, (), ID, A>`](crate::utils::rbtree::RbTree) so
+    //! that every element is its own key and the value is always `()`.
+    //!
+    //! # Complexity
+    //!
+    //! | Operation         | Time     |
+    //! |-------------------|----------|
+    //! | `try_insert`      | O(log n) |
+    //! | `remove`          | O(log n) |
+    //! | `contains` / `get`| O(log n) |
+    //! | `iter`            | O(n)     |
+    //! | `is_subset`       | O(n + m) |
+    //! | `is_superset`     | O(n + m) |
+    //! | `is_disjoint`     | O(n + m) |
+    //! | `clear`           | O(n)     |
+    //!
+    //! # Token threading
+    //!
+    //! Every mutating operation consumes a lock token and returns it together with
+    //! the result.  Read-only operations (`contains`, `get`, `iter`, and the
+    //! set-relation queries) borrow the set without consuming the token.
+    //!
+    //! # Dropping
+    //!
+    //! Because releasing memory requires a token that cannot be passed to
+    //! `Drop::drop`, a non-empty `RbTreeSet` **must** be explicitly emptied with
+    //! [`clear`](RbTreeSet::clear) before it goes out of scope.  Dropping a
+    //! non-empty set panics.
+
+    use core::borrow::Borrow;
+    use core::cmp::Ordering;
+
+    use crate::kernel::locking::{CanAcquire, LockId, PreviousToken};
+    use crate::utils::allocator::{Allocator, Error as AllocatorError};
+    use crate::utils::rbtree::{Iter as TreeIter, RbTree};
+
+    /// An ordered set backed by an [`RbTree`].
+    ///
+    /// `RbTreeSet<T, ID, A>` wraps `RbTree<T, (), ID, A>`.  Because every element
+    /// is its own key and the value is always `()`, the set provides membership
+    /// tests, ordered iteration, and set-algebraic queries.
+    pub struct RbTreeSet<T, ID: LockId, A: Allocator<ID>> {
+        inner: RbTree<T, (), ID, A>,
+    }
+
+    unsafe impl<T: Send, ID: LockId, A: Allocator<ID> + Send> Send for RbTreeSet<T, ID, A> {}
+    unsafe impl<T: Sync, ID: LockId, A: Allocator<ID> + Sync> Sync for RbTreeSet<T, ID, A> {}
+
+    impl<T, ID: LockId, A: Allocator<ID>> RbTreeSet<T, ID, A> {
+        /// Creates an empty set backed by `alloc`.
+        ///
+        /// The call is `const` so sets can be created in static or constant
+        /// contexts.
+        pub const fn new_in(alloc: A) -> Self {
+            Self {
+                inner: RbTree::new_in(alloc),
+            }
+        }
+
+        /// Returns the number of elements.
+        #[inline]
+        pub fn len(&self) -> usize {
+            self.inner.len()
+        }
+
+        /// Returns `true` if the set contains no elements.
+        #[inline]
+        pub fn is_empty(&self) -> bool {
+            self.inner.is_empty()
+        }
+
+        /// Borrows the underlying allocator.
+        #[inline]
+        pub fn allocator(&self) -> &A {
+            self.inner.allocator()
+        }
+    }
+
+    impl<T: Ord, ID: LockId, A: Allocator<ID>> RbTreeSet<T, ID, A> {
+        /// Returns `true` if `value` is present in the set.
+        ///
+        /// Accepts any borrowed form of `T` — e.g. a `&str` query on a
+        /// `RbTreeSet<String, _, _>`.
+        pub fn contains<Q>(&self, value: &Q) -> bool
+        where
+            T: Borrow<Q>,
+            Q: Ord + ?Sized,
+        {
+            self.inner.contains_key(value)
+        }
+
+        /// Returns a shared reference to the stored element equal to `value`, or
+        /// `None` if absent.
+        ///
+        /// This is useful when the set stores rich types and the caller needs
+        /// access to the stored instance rather than just a membership boolean.
+        pub fn get<Q>(&self, value: &Q) -> Option<&T>
+        where
+            T: Borrow<Q>,
+            Q: Ord + ?Sized,
+        {
+            match self.inner.find(|curr| value.cmp(curr)) {
+                Some((key, _)) => Some(key),
+                None => None,
+            }
+        }
+
+        /// Searches for an value that satisfies a `callback`.
+        ///
+        /// The comparator function should return an order code that indicates
+        /// whether the desired target is `Less`, `Equal` or `Greater` the argument.
+        pub fn find<Q, CB>(&self, cb: CB) -> Option<&T>
+        where
+            T: Borrow<Q>,
+            Q: Ord + ?Sized,
+            CB: FnMut(&Q) -> Ordering,
+        {
+            match self.inner.find(cb) {
+                Some((key, _)) => Some(key),
+                None => None,
+            }
+        }
+
+        /// Inserts `value` into the set.
+        ///
+        /// - Returns `Ok((false, token))` if `value` was not present (inserted).
+        /// - Returns `Ok((true, token))` if `value` was already present (the
+        ///   stored element is **not** replaced, and no allocation is made).
+        /// - Returns `Err((AllocatorError, token))` if a node could not be
+        ///   allocated; in that case the set is unchanged.
+        pub fn try_insert<Token>(
+            &mut self,
+            value: T,
+            token: Token,
+        ) -> Result<(bool, Token), (AllocatorError, Token)>
+        where
+            Token: CanAcquire<ID::Level> + PreviousToken,
+        {
+            match self.inner.try_insert(value, (), token) {
+                Ok((old, token)) => Ok((old.is_some(), token)),
+                Err(e) => Err(e),
+            }
+        }
+
+        /// Removes `value` from the set.
+        ///
+        /// Returns `(true, token)` if the element was present and has been
+        /// removed, or `(false, token)` if it was absent.
+        pub fn remove<Q, Token>(&mut self, value: &Q, token: Token) -> (bool, Token)
+        where
+            T: Borrow<Q>,
+            Q: Ord + ?Sized,
+            Token: CanAcquire<ID::Level> + PreviousToken,
+        {
+            let (removed, token) = self.inner.remove(value, token);
+            (removed.is_some(), token)
+        }
+
+        /// Removes all elements, freeing every node.
+        ///
+        /// Uses the same iterative stack-safe teardown as [`RbTree::clear`].  The
+        /// token is threaded through every `deallocate` call and returned once the
+        /// set is empty.
+        ///
+        /// After this call [`is_empty`](RbTreeSet::is_empty) returns `true` and
+        /// the set may be reused or dropped safely.
+        pub fn clear<Token>(&mut self, token: Token) -> Token
+        where
+            Token: CanAcquire<ID::Level> + PreviousToken,
+        {
+            self.inner.clear(token)
+        }
+
+        /// Returns an in-order iterator over shared references to elements.
+        ///
+        /// Elements are yielded in ascending order.  The iterator implements
+        /// [`ExactSizeIterator`].
+        pub fn iter(&self) -> SetIter<'_, T> {
+            SetIter {
+                inner: self.inner.iter(),
+            }
+        }
+
+        /// Returns `true` if every element of `self` is also in `other`.
+        ///
+        /// An empty set is a subset of every set, including another empty set.
+        ///
+        /// Uses a merge-join over the two sorted iterators in `O(n + m)` time,
+        /// where `n = self.len()` and `m = other.len()`.
+        pub fn is_subset<ID2, A2>(&self, other: &RbTreeSet<T, ID2, A2>) -> bool
+        where
+            ID2: LockId,
+            A2: Allocator<ID2>,
+        {
+            // Early exit: a larger set cannot be a subset of a smaller one.
+            if self.len() > other.len() {
+                return false;
+            }
+            let mut other_iter = other.iter().peekable();
+            'outer: for val in self.iter() {
+                // Advance `other_iter` until it is >= `val`.
+                loop {
+                    match other_iter.peek() {
+                        // `other` is exhausted before `self` — not a subset.
+                        None => return false,
+                        Some(&o) => match val.cmp(o) {
+                            // Found a match; move on to the next element of `self`.
+                            Ordering::Equal => {
+                                other_iter.next();
+                                continue 'outer;
+                            }
+                            // `other` has passed `val` without a match.
+                            Ordering::Less => return false,
+                            // `other` hasn't reached `val` yet; advance it.
+                            Ordering::Greater => {
+                                other_iter.next();
+                            }
+                        },
+                    }
+                }
+            }
+            true
+        }
+
+        /// Returns `true` if every element of `other` is also in `self`.
+        ///
+        /// Equivalent to `other.is_subset(self)`.
+        pub fn is_superset<ID2, A2>(&self, other: &RbTreeSet<T, ID2, A2>) -> bool
+        where
+            ID2: LockId,
+            A2: Allocator<ID2>,
+        {
+            other.is_subset(self)
+        }
+
+        /// Returns `true` if `self` and `other` share no elements.
+        ///
+        /// Two empty sets are disjoint.  Uses a merge-join in `O(n + m)` time.
+        pub fn is_disjoint<ID2, A2>(&self, other: &RbTreeSet<T, ID2, A2>) -> bool
+        where
+            ID2: LockId,
+            A2: Allocator<ID2>,
+        {
+            let mut a = self.iter().peekable();
+            let mut b = other.iter().peekable();
+            loop {
+                match (a.peek(), b.peek()) {
+                    // Either iterator exhausted — no common element found.
+                    (None, _) | (_, None) => return true,
+                    (Some(&x), Some(&y)) => match x.cmp(y) {
+                        Ordering::Equal => return false,
+                        Ordering::Less => {
+                            a.next();
+                        }
+                        Ordering::Greater => {
+                            b.next();
+                        }
+                    },
+                }
+            }
+        }
+    }
+
+    impl<T, ID: LockId, A: Allocator<ID>> Drop for RbTreeSet<T, ID, A> {
+        /// Panics if the set is non-empty.
+        ///
+        /// Memory cannot be released here because `Drop::drop` cannot accept the
+        /// lock token required by the allocator.  Call [`RbTreeSet::clear`] before
+        /// the set goes out of scope.
+        fn drop(&mut self) {
+            if !self.is_empty() {
+                panic!(
+                    "A non-empty RbTreeSet must never be dropped. \
+                 Use RbTreeSet::clear(...) instead!"
+                );
+            }
+        }
+    }
+
+    impl<'a, T: Ord, ID: LockId, A: Allocator<ID>> IntoIterator for &'a RbTreeSet<T, ID, A> {
+        type Item = &'a T;
+        type IntoIter = SetIter<'a, T>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.iter()
+        }
+    }
+
+    /// In-order iterator over the elements of an [`RbTreeSet`].
+    ///
+    /// Produced by [`RbTreeSet::iter`] and [`IntoIterator`] for `&RbTreeSet`.
+    /// Yields shared references to elements in ascending order and implements
+    /// [`ExactSizeIterator`].
+    pub struct SetIter<'a, T> {
+        inner: TreeIter<'a, T, ()>,
+    }
+
+    impl<'a, T> Iterator for SetIter<'a, T> {
+        type Item = &'a T;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            // `TreeIter` yields `(&K, &V)`; project out only the key.
+            self.inner.next().map(|(k, _)| k)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.inner.size_hint()
+        }
+    }
+
+    impl<'a, T> ExactSizeIterator for SetIter<'a, T> {}
+
+    #[cfg(test)]
+    mod test {
+        use std::collections::BTreeSet;
+        use std::vec::Vec;
+
+        use crate::kernel::locking::{EpilogueLevel, RootToken};
+        use crate::kernel::locking::{MemoryManagementLevelID, PreviousToken};
+
+        use super::*;
+
+        extern crate std;
+
+        struct TestAlloc;
+
+        unsafe impl Allocator<MemoryManagementLevelID> for TestAlloc {
+            fn allocate<Token>(
+                &self,
+                layout: core::alloc::Layout,
+                token: Token,
+            ) -> Result<(core::ptr::NonNull<u8>, Token), (AllocatorError, Token)>
+            where
+                Token: CanAcquire<<MemoryManagementLevelID as LockId>::Level> + PreviousToken,
+            {
+                match unsafe { core::ptr::NonNull::new(std::alloc::alloc(layout)) } {
+                    Some(ptr) => Ok((ptr, token)),
+                    None => Err((AllocatorError::OutOfMemory, token)),
+                }
+            }
+
+            unsafe fn deallocate<Token>(
+                &self,
+                ptr: core::ptr::NonNull<u8>,
+                layout: core::alloc::Layout,
+                token: Token,
+            ) -> Token
+            where
+                Token: CanAcquire<<MemoryManagementLevelID as LockId>::Level> + PreviousToken,
+            {
+                unsafe { std::alloc::dealloc(ptr.as_ptr(), layout) };
+                token
+            }
+        }
+
+        type TestSet<T> = RbTreeSet<T, MemoryManagementLevelID, TestAlloc>;
+
+        fn new_set<T: Ord>() -> TestSet<T> {
+            RbTreeSet::new_in(TestAlloc)
+        }
+
+        macro_rules! insert {
+            ($s:expr, $v:expr, $tok:expr) => {
+                $s.try_insert($v, $tok)
+                    .unwrap_or_else(|(e, _)| panic!("insert failed: {:?}", e))
+            };
+        }
+
+        #[test]
+        fn empty_set() {
+            let root = unsafe { RootToken::forge() };
+            let (level, token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            assert!(s.is_empty());
+            assert_eq!(s.len(), 0);
+            assert!(!s.contains(&0));
+            assert_eq!(s.get(&0), None);
+
+            let token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn insert_new_element_returns_false() {
+            let root = unsafe { RootToken::forge() };
+            let (level, token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            let (was_present, token) = insert!(s, 42, token);
+            assert!(!was_present, "new element must report not-present");
+            assert_eq!(s.len(), 1);
+            assert!(s.contains(&42));
+
+            let token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn insert_duplicate_returns_true_and_is_noop() {
+            let root = unsafe { RootToken::forge() };
+            let (level, token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            let (_, token) = insert!(s, 7, token);
+            let (was_present, token) = insert!(s, 7, token);
+            assert!(was_present, "duplicate must report already-present");
+            assert_eq!(s.len(), 1, "duplicate must not grow the set");
+
+            let token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn insert_many_sequential() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for i in 0..500_i32 {
+                (_, token) = insert!(s, i, token);
+            }
+            assert_eq!(s.len(), 500);
+            for i in 0..500_i32 {
+                assert!(s.contains(&i));
+            }
+            assert!(!s.contains(&500));
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn insert_many_reverse() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for i in (0..500_i32).rev() {
+                (_, token) = insert!(s, i, token);
+            }
+            assert_eq!(s.len(), 500);
+            for i in 0..500_i32 {
+                assert!(s.contains(&i));
+            }
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn get_returns_stored_reference() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s: TestSet<std::string::String> = new_set();
+
+            (_, token) = insert!(s, "hello".to_owned(), token);
+            assert_eq!(s.get("hello"), Some(&"hello".to_owned()));
+            assert_eq!(s.get("world"), None);
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn get_absent_returns_none() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for i in [1, 2, 3] {
+                (_, token) = insert!(s, i, token);
+            }
+            assert_eq!(s.get(&99), None);
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn find_returns_stored_reference() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s: TestSet<std::string::String> = new_set();
+
+            (_, token) = insert!(s, "hello".to_owned(), token);
+            assert_eq!(s.find(|curr| "hello".cmp(curr)), Some(&"hello".to_owned()));
+            assert_eq!(s.find(|curr| "world".cmp(curr)), None);
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn find_absent_returns_none() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for i in [1, 2, 3] {
+                (_, token) = insert!(s, i, token);
+            }
+            assert_eq!(s.find(|c| 99.cmp(c)), None);
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn remove_present_element() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for i in [1, 2, 3] {
+                (_, token) = insert!(s, i, token);
+            }
+
+            let (removed, token2) = s.remove(&2, token);
+            assert!(removed);
+            assert!(!s.contains(&2));
+            assert_eq!(s.len(), 2);
+
+            token = s.clear(token2);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn remove_absent_element() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for i in [1, 2, 3] {
+                (_, token) = insert!(s, i, token);
+            }
+
+            let (removed, token2) = s.remove(&99, token);
+            assert!(!removed);
+            assert_eq!(s.len(), 3);
+
+            token = s.clear(token2);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn double_remove_second_is_false() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            (_, token) = insert!(s, 5, token);
+            let (r1, token) = s.remove(&5, token);
+            assert!(r1);
+            let (r2, mut token) = s.remove(&5, token);
+            assert!(!r2);
+            assert!(s.is_empty());
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn remove_until_empty() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for i in 0..200_i32 {
+                (_, token) = insert!(s, i, token);
+            }
+            for i in 0..200_i32 {
+                let (ok, t) = s.remove(&i, token);
+                token = t;
+                assert!(ok, "expected removal of {i}");
+            }
+            assert!(s.is_empty());
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn iter_yields_sorted_elements() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for &v in &[5, 1, 3, 2, 4] {
+                (_, token) = insert!(s, v, token);
+            }
+            let got: Vec<i32> = s.iter().copied().collect();
+            assert_eq!(got, [1, 2, 3, 4, 5]);
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn iter_empty_set_yields_nothing() {
+            let root = unsafe { RootToken::forge() };
+            let (level, token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            assert_eq!(s.iter().count(), 0);
+
+            let token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn iter_exact_size() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for i in 0..10_i32 {
+                (_, token) = insert!(s, i, token);
+            }
+            let it = s.iter();
+            assert_eq!(it.len(), 10);
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn into_iter_ref() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for &v in &[3, 1, 2] {
+                (_, token) = insert!(s, v, token);
+            }
+            let got: Vec<_> = (&s).into_iter().copied().collect();
+            assert_eq!(got, [1, 2, 3]);
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn iter_matches_btreeset() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+            let mut model = BTreeSet::new();
+            let mut x: u64 = 0xdeadbeef;
+
+            for _ in 0..2000 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let v = (x % 1000) as i32;
+                (_, token) = insert!(s, v, token);
+                model.insert(v);
+            }
+
+            let got: Vec<i32> = s.iter().copied().collect();
+            let want: Vec<i32> = model.iter().copied().collect();
+            assert_eq!(got, want);
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn clear_empties_set() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for i in [1, 2, 3] {
+                (_, token) = insert!(s, i, token);
+            }
+            token = s.clear(token);
+            assert!(s.is_empty());
+            assert_eq!(s.len(), 0);
+
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn clear_then_reuse() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s = new_set::<i32>();
+
+            for i in [10, 20, 30] {
+                (_, token) = insert!(s, i, token);
+            }
+            token = s.clear(token);
+
+            (_, token) = insert!(s, 99, token);
+            assert!(s.contains(&99));
+            assert_eq!(s.len(), 1);
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn empty_is_subset_of_everything() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut a = new_set::<i32>();
+            let mut b = new_set::<i32>();
+
+            for i in [1, 2, 3] {
+                (_, token) = insert!(b, i, token);
+            }
+
+            assert!(a.is_subset(&b));
+            assert!(!b.is_subset(&a));
+
+            token = a.clear(token);
+            token = b.clear(token);
+            drop(a);
+            drop(b);
+            level.leave(token);
+        }
+
+        #[test]
+        fn equal_sets_are_mutual_subsets() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut a = new_set::<i32>();
+            let mut b = new_set::<i32>();
+
+            for i in [1, 2, 3] {
+                (_, token) = insert!(a, i, token);
+                (_, token) = insert!(b, i, token);
+            }
+
+            assert!(a.is_subset(&b));
+            assert!(b.is_subset(&a));
+
+            token = a.clear(token);
+            token = b.clear(token);
+            drop(a);
+            drop(b);
+            level.leave(token);
+        }
+
+        #[test]
+        fn proper_subset() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut a = new_set::<i32>(); // {1, 2}
+            let mut b = new_set::<i32>(); // {1, 2, 3}
+
+            for i in [1, 2] {
+                (_, token) = insert!(a, i, token);
+            }
+            for i in [1, 2, 3] {
+                (_, token) = insert!(b, i, token);
+            }
+
+            assert!(a.is_subset(&b));
+            assert!(!b.is_subset(&a));
+            assert!(b.is_superset(&a));
+
+            token = a.clear(token);
+            token = b.clear(token);
+            drop(a);
+            drop(b);
+            level.leave(token);
+        }
+
+        #[test]
+        fn overlapping_sets_are_not_subsets() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut a = new_set::<i32>(); // {1, 2, 4}
+            let mut b = new_set::<i32>(); // {1, 2, 3}
+
+            for i in [1, 2, 4] {
+                (_, token) = insert!(a, i, token);
+            }
+            for i in [1, 2, 3] {
+                (_, token) = insert!(b, i, token);
+            }
+
+            assert!(!a.is_subset(&b));
+            assert!(!b.is_subset(&a));
+
+            token = a.clear(token);
+            token = b.clear(token);
+            drop(a);
+            drop(b);
+            level.leave(token);
+        }
+
+        #[test]
+        fn disjoint_no_common_elements() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut a = new_set::<i32>(); // {1, 3, 5}
+            let mut b = new_set::<i32>(); // {2, 4, 6}
+
+            for i in [1, 3, 5] {
+                (_, token) = insert!(a, i, token);
+            }
+            for i in [2, 4, 6] {
+                (_, token) = insert!(b, i, token);
+            }
+
+            assert!(a.is_disjoint(&b));
+            assert!(b.is_disjoint(&a));
+
+            token = a.clear(token);
+            token = b.clear(token);
+            drop(a);
+            drop(b);
+            level.leave(token);
+        }
+
+        #[test]
+        fn not_disjoint_shared_element() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut a = new_set::<i32>(); // {1, 2, 3}
+            let mut b = new_set::<i32>(); // {3, 4, 5}
+
+            for i in [1, 2, 3] {
+                (_, token) = insert!(a, i, token);
+            }
+            for i in [3, 4, 5] {
+                (_, token) = insert!(b, i, token);
+            }
+
+            assert!(!a.is_disjoint(&b));
+
+            token = a.clear(token);
+            token = b.clear(token);
+            drop(a);
+            drop(b);
+            level.leave(token);
+        }
+
+        #[test]
+        fn disjoint_empty_with_nonempty() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut a = new_set::<i32>();
+            let mut b = new_set::<i32>();
+
+            for i in [1, 2, 3] {
+                (_, token) = insert!(b, i, token);
+            }
+
+            assert!(a.is_disjoint(&b));
+            assert!(b.is_disjoint(&a));
+
+            token = a.clear(token);
+            token = b.clear(token);
+            drop(a);
+            drop(b);
+            level.leave(token);
+        }
+
+        #[test]
+        fn disjoint_both_empty() {
+            let root = unsafe { RootToken::forge() };
+            let (level, token) = EpilogueLevel::enter(root);
+            let mut a = new_set::<i32>();
+            let mut b = new_set::<i32>();
+
+            assert!(a.is_disjoint(&b));
+
+            let token = a.clear(token);
+            let token = b.clear(token);
+            drop(a);
+            drop(b);
+            level.leave(token);
+        }
+
+        #[test]
+        fn borrowed_key_string() {
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+            let mut s: TestSet<std::string::String> = new_set();
+
+            (_, token) = insert!(s, "alpha".to_owned(), token);
+            (_, token) = insert!(s, "beta".to_owned(), token);
+
+            // &str lookup via Borrow<str>
+            assert!(s.contains("alpha"));
+            assert!(!s.contains("gamma"));
+            assert_eq!(s.get("beta"), Some(&"beta".to_owned()));
+
+            let (removed, mut token) = s.remove("alpha", token);
+            assert!(removed);
+            assert!(!s.contains("alpha"));
+
+            token = s.clear(token);
+            drop(s);
+            level.leave(token);
+        }
+
+        #[test]
+        fn elements_are_dropped_on_clear() {
+            use std::rc::Rc;
+
+            let root = unsafe { RootToken::forge() };
+            let (level, mut token) = EpilogueLevel::enter(root);
+
+            // Use a newtype that wraps Rc and is Ord by index so we can insert
+            // multiple distinct elements.
+            #[derive(Clone, PartialEq, Eq)]
+            struct Tracked(usize, Rc<()>);
+            impl PartialOrd for Tracked {
+                fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                    Some(self.cmp(other))
+                }
+            }
+            impl Ord for Tracked {
+                fn cmp(&self, other: &Self) -> Ordering {
+                    self.0.cmp(&other.0)
+                }
+            }
+
+            let probe = Rc::new(());
+            let mut s: TestSet<Tracked> = new_set();
+
+            for i in 0..20_usize {
+                (_, token) = insert!(s, Tracked(i, Rc::clone(&probe)), token);
+            }
+            assert_eq!(Rc::strong_count(&probe), 21);
+
+            token = s.clear(token);
+            assert_eq!(Rc::strong_count(&probe), 1, "clear must drop all elements");
+
+            drop(s);
+            level.leave(token);
+        }
     }
 }
