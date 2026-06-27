@@ -872,43 +872,12 @@ mod test {
     use std::vec::Vec;
 
     use crate::kernel::locking::{EpilogueLevel, RootToken};
-    use crate::kernel::locking::{MemoryManagementLevelID, PreviousToken};
+    use crate::kernel::locking::MemoryManagementLevelID;
+    use crate::utils::testing::HeapAllocator;
 
     use super::*;
 
     extern crate std;
-
-    struct TestAllocator;
-
-    impl TestAllocator {
-        fn new() -> Self {
-            Self
-        }
-    }
-
-    unsafe impl Allocator<MemoryManagementLevelID> for TestAllocator {
-        fn allocate<Token>(
-            &self,
-            layout: Layout,
-            token: Token,
-        ) -> Result<(NonNull<u8>, Token), (AllocatorError, Token)>
-        where
-            Token: CanAcquire<<MemoryManagementLevelID as LockId>::Level> + PreviousToken,
-        {
-            match unsafe { NonNull::new(std::alloc::alloc(layout)) } {
-                Some(ptr) => Ok((ptr, token)),
-                None => Err((AllocatorError::OutOfMemory, token)),
-            }
-        }
-
-        unsafe fn deallocate<Token>(&self, ptr: NonNull<u8>, layout: Layout, token: Token) -> Token
-        where
-            Token: CanAcquire<<MemoryManagementLevelID as LockId>::Level> + PreviousToken,
-        {
-            unsafe { std::alloc::dealloc(ptr.as_ptr(), layout) };
-            token
-        }
-    }
 
     /// Insert `key`/`value`, asserting no allocation error occurs.
     /// Returns `(old_value, token)`.
@@ -995,7 +964,7 @@ mod test {
     }
 
     fn verify<K: Ord + core::fmt::Debug, V>(
-        t: &RbTree<K, V, MemoryManagementLevelID, TestAllocator>,
+        t: &RbTree<K, V, MemoryManagementLevelID, HeapAllocator>,
     ) {
         unsafe {
             assert_eq!(color_of(t.root), Color::Black, "root must be black");
@@ -1013,8 +982,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<i32, i32, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i32, i32, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         assert!(t.is_empty());
         assert_eq!(t.len(), 0);
@@ -1034,8 +1003,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<i32, i32, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i32, i32, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         for i in 0..1000_i32 {
             let (old, t2) = insert!(t, i, i * 10, token);
@@ -1061,8 +1030,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<i32, i32, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i32, i32, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         for i in (0..500_i32).rev() {
             (_, token) = insert!(t, i, i, token);
@@ -1081,8 +1050,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<i32, i32, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i32, i32, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         let (old, token) = insert!(t, 42, 1, token);
         assert_eq!(old, None);
@@ -1108,8 +1077,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<i64, i64, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i64, i64, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
         let mut model = BTreeMap::new();
         let mut rng = Rng(0x1234_5678_9abc_def0);
 
@@ -1134,8 +1103,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<i32, i32, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i32, i32, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         for i in 0..100_i32 {
             (_, token) = insert!(t, i, i, token);
@@ -1159,8 +1128,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<i32, i32, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i32, i32, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         for i in 0..100_i32 {
             (_, token) = insert!(t, i, i * 2, token);
@@ -1200,8 +1169,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<i32, i32, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i32, i32, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         for i in 0..300_i32 {
             (_, token) = insert!(t, i, i, token);
@@ -1228,8 +1197,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<i32, i32, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i32, i32, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         for i in 0..500_i32 {
             (_, token) = insert!(t, i, i, token);
@@ -1255,8 +1224,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<std::string::String, i32, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<std::string::String, i32, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         (_, token) = insert!(t, "hello".to_owned(), 1, token);
         (_, token) = insert!(t, "world".to_owned(), 2, token);
@@ -1285,8 +1254,8 @@ mod test {
         let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
         let probe = Rc::new(());
-        let mut t: RbTree<i32, Rc<()>, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i32, Rc<()>, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         for i in 0..50_i32 {
             (_, token) = insert!(t, i, Rc::clone(&probe), token);
@@ -1315,8 +1284,8 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
-        let mut t: RbTree<i32, i32, MemoryManagementLevelID, TestAllocator> =
-            RbTree::new_in(TestAllocator::new());
+        let mut t: RbTree<i32, i32, MemoryManagementLevelID, HeapAllocator> =
+            RbTree::new_in(HeapAllocator::new());
 
         (_, token) = insert!(t, 99, 99, token);
 
