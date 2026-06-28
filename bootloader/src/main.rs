@@ -8,6 +8,8 @@ extern crate alloc;
 use uefi::prelude::*;
 use uefi::println;
 
+use busyos::kernel::bootinfo::Bootinfo;
+
 /// Path to the kernel ELF on the ESP, relative to the volume root.
 pub const KERNEL_PATH: &str = r"\EFI\BOOT\busyos.elf";
 
@@ -19,8 +21,10 @@ fn main() -> Status {
     println!("Booting BUSYOS!");
 
     // Try to load BUSYOS kernel ELF
+    let mut bootinfo = Bootinfo::default();
     let handle = uefi::boot::image_handle();
-    let kernel_elf = elf_loader::ELF::load(KERNEL_PATH, handle);
+    let kernel_elf = elf_loader::ELF::read(KERNEL_PATH, handle);
+    kernel_elf.load(&mut bootinfo);
 
     // Exit boot service.
     //

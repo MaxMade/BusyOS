@@ -40,6 +40,7 @@ version = "0.1.0"
 dependencies = [
  "arch_generic_derive",
  "bitfield-struct",
+ "busyos",
  "kernel_derive",
  "nix",
 ]
@@ -48,6 +49,8 @@ dependencies = [
 name = "busyos_bootloader"
 version = "0.1.0"
 dependencies = [
+ "busyos",
+ "elf",
  "uefi",
 ]
 
@@ -62,6 +65,12 @@ name = "cfg_aliases"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
+name = "elf"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55dd888a213fc57e957abf2aa305ee3e8a28dbe05687a251f33b637cd46b0070"
 
 [[package]]
 name = "kernel_derive"
