@@ -1,4 +1,4 @@
-#[cfg(not(test))]
+#[cfg(all(not(test),not(feature="library")))]
 pub mod panic;
 
 pub mod locking;

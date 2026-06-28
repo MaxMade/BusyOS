@@ -11,5 +11,8 @@ bitfield-struct = { version = "0.13.0", default-features = false }
 
 [dev-dependencies]
 nix = { version = "0.31.3", features = ["mman"] }
+busyos = { path = ".", features = ["unittest"] }
 
 [features]
+unittest = []
+library = []
