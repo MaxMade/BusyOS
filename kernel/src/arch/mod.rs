@@ -8,6 +8,7 @@ pub mod amd64;
 #[cfg(target_arch = "x86_64")]
 mod imp {
     pub use crate::arch::amd64::paging::*;
+    pub use crate::arch::amd64::bootinfo::*;
 }
 
 // Re-export without "::imp::*"
