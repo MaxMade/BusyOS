@@ -1,7 +1,8 @@
 use core::ffi::c_void;
+use core::ptr;
 
-use crate::arch::generic::paging::PhysicalAddress;
 use crate::arch::Bootinfo as ArchBootinfo;
+use crate::arch::generic::paging::PhysicalAddress;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -44,10 +45,32 @@ pub struct Bootinfo {
     pub arch_bootinfo: ArchBootinfo,
 }
 
+impl Default for Bootinfo {
+    fn default() -> Self {
+        Self {
+            kernel_virt_phys_offset: 0,
+            kernel_elf_start: PhysicalAddress::new(ptr::null_mut()),
+            kernel_elf_size: 0,
+            kernel_start_phys: PhysicalAddress::new(ptr::null_mut()),
+            kernel_end_phys: PhysicalAddress::new(ptr::null_mut()),
+            text_start_phys: PhysicalAddress::new(ptr::null_mut()),
+            text_end_phys: PhysicalAddress::new(ptr::null_mut()),
+            rodata_start_phys: PhysicalAddress::new(ptr::null_mut()),
+            rodata_end_phys: PhysicalAddress::new(ptr::null_mut()),
+            data_start_phys: PhysicalAddress::new(ptr::null_mut()),
+            data_end_phys: PhysicalAddress::new(ptr::null_mut()),
+            bss_start_phys: PhysicalAddress::new(ptr::null_mut()),
+            bss_end_phys: PhysicalAddress::new(ptr::null_mut()),
+            arch_bootinfo: Default::default(),
+        }
+    }
+}
 
 /// Gets address of [`ArchBootinfo`] for [`Bootinfo`].
 #[unsafe(no_mangle)]
-pub extern "C" fn __kernel_bootinfo_get_arch_bootinfo(bootinfo: *mut Bootinfo) -> *mut ArchBootinfo {   
+pub extern "C" fn __kernel_bootinfo_get_arch_bootinfo(
+    bootinfo: *mut Bootinfo,
+) -> *mut ArchBootinfo {
     let bootinfo = unsafe { bootinfo.as_mut().unwrap() };
     core::ptr::addr_of_mut!(bootinfo.arch_bootinfo)
 }

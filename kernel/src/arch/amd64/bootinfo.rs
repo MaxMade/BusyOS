@@ -1,6 +1,7 @@
 //! AMD64-specific boot information
 
 use core::ffi::c_void;
+use core::ptr;
 
 use crate::arch::{CR3, generic::paging::PhysicalAddress};
 
@@ -16,6 +17,16 @@ pub struct Bootinfo {
 
     /// Physical address of x86_64's descriptor of the IDT used by UEFI.
     pub uefi_idt: PhysicalAddress<c_void>, // TODO(@MaxMade): replace by actual IDT type
+}
+
+impl Default for Bootinfo {
+    fn default() -> Self {
+        Self {
+            uefi_cr3: Default::default(),
+            uefi_gdt: PhysicalAddress::new(ptr::null_mut()),
+            uefi_idt: PhysicalAddress::new(ptr::null_mut()),
+        }
+    }
 }
 
 /// Stores `cr3` register in [`Bootinfo`].
