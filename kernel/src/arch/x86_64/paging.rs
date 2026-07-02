@@ -251,7 +251,7 @@ trait PageTableEntry {
         if access_right.is_readable() {
             // Nothing to do — present implies readable on x86_64.
         } else {
-            panic!("amd64 paging does not support non-readable memory!");
+            panic!("x86_64 paging does not support non-readable memory!");
         }
 
         self.set_writable(access_right.is_writable());
@@ -1176,7 +1176,7 @@ pub struct PageTables<PFA: PageFrameAllocator> {
 impl<PFA: PageFrameAllocator> PageTables<PFA> {
     /// Checkes if a virtual address is canonical.
     ///
-    /// For AMD64, the most significant 16 bits of any virtual address, bits 48
+    /// For x86_64, the most significant 16 bits of any virtual address, bits 48
     /// through 63, must be copies of bit 47. Otherwise, any access will raise
     /// an exception.
     #[inline]

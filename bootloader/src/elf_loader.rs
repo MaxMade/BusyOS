@@ -185,7 +185,7 @@ impl ELF {
         bootinfo.kernel_virt_phys_offset = _kernel_start.addr() - mem.as_ptr().addr();
         #[cfg(target_arch = "x86_64")]
         {
-            bootinfo.arch_bootinfo.uefi_cr3 = busyos::arch::amd64::paging::CR3::read();
+            bootinfo.arch_bootinfo.uefi_cr3 = busyos::arch::x86_64::paging::CR3::read();
 
             // TODO(@MaxMade): Save address of GDT
 

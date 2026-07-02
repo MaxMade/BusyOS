@@ -373,7 +373,7 @@ pub trait PageFrameAllocator {
 /// Architecture-generic interface for managing a hardware page table.
 ///
 /// Implementors provide the concrete page table manipulation for a specific
-/// architecture (e.g. `arch::amd64::paging`). Generic kernel code
+/// architecture (e.g. `arch::x86_64::paging`). Generic kernel code
 /// programs all memory mappings exclusively through this trait, keeping
 /// architecture-specific page table structures behind the abstraction
 /// boundary.

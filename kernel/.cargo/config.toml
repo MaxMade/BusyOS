@@ -1,5 +1,5 @@
 [alias]
-build-amd64  = "build --target x86_64-unknown-none --bin busyos -Z build-std=core,compiler_builtins,alloc -Z build-std-features=compiler-builtins-mem"
+build-x86_64  = "build --target x86_64-unknown-none --bin busyos -Z build-std=core,compiler_builtins,alloc -Z build-std-features=compiler-builtins-mem"
 
 [target.x86_64-unknown-none]
 rustflags = [
