@@ -389,7 +389,7 @@ pub trait PageFrameAllocator {
 /// Several methods are `unsafe` because incorrect use can violate memory
 /// safety globally: a bad mapping can corrupt kernel or user memory, cause
 /// undefined behaviour on the next memory access, or crash the system.
-pub trait Paging<PageFrameAllocator> {
+pub trait Paging<PFA: PageFrameAllocator> {
     /// Destroys the page tables and frees all associated page table frames.
     ///
     /// This must be called instead of letting [`Paging`] drop, since
