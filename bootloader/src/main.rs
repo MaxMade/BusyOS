@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+pub mod arch;
 pub mod elf_loader;
 
 extern crate alloc;
@@ -25,6 +26,9 @@ fn main() -> Status {
     let handle = uefi::boot::image_handle();
     let kernel_elf = elf_loader::ELF::read(KERNEL_PATH, handle);
     kernel_elf.load(&mut bootinfo);
+
+    // Update bootinformation
+    crate::arch::update_bootinfo(&mut bootinfo);
 
     // Exit boot service.
     //

@@ -88,20 +88,7 @@ impl ELF {
         };
 
         // Minimal validity check
-        #[cfg(target_arch = "x86_64")]
-        {
-            if elf.ehdr.class != elf::file::Class::ELF64 {
-                panic!("Unexpected ELF class: {:?}", elf.ehdr.class);
-            }
-
-            if elf.ehdr.e_type != elf::abi::ET_DYN {
-                panic!("Unexpected ELF type: {:?}", elf.ehdr.e_type);
-            }
-
-            if elf.ehdr.e_machine != elf::abi::EM_X86_64 {
-                panic!("Unexpected ELF machine: {:?}", elf.ehdr.e_machine);
-            }
-        }
+        crate::arch::check_elf_header(&elf);
 
         // Search for _kernel_start and _kernel_end symbol
         let (symbol_tbl, string_tbl) = match elf.symbol_table() {
@@ -183,13 +170,5 @@ impl ELF {
         bootinfo.kernel_elf_start = PhysicalAddress::new(self.data.as_ptr() as _);
         bootinfo.kernel_elf_size = self.data.len();
         bootinfo.kernel_virt_phys_offset = _kernel_start.addr() - mem.as_ptr().addr();
-        #[cfg(target_arch = "x86_64")]
-        {
-            bootinfo.arch_bootinfo.uefi_cr3 = busyos::arch::x86_64::paging::CR3::read();
-
-            // TODO(@MaxMade): Save address of GDT
-
-            // TODO(@MaxMade): Save address of IDT
-        }
     }
 }
