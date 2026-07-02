@@ -4,7 +4,10 @@ use core::ffi::c_void;
 
 use alloc::{slice, vec::Vec};
 use busyos::{
-    arch::{REGULAR_PAGE_SIZE, generic::paging::VirtualAddress},
+    arch::{
+        REGULAR_PAGE_SIZE,
+        generic::paging::{PhysicalAddress, VirtualAddress},
+    },
     kernel::bootinfo::Bootinfo,
 };
 use elf::{ElfBytes, endian::AnyEndian};
@@ -174,6 +177,19 @@ impl ELF {
                 mem[memory_offset..memory_offset + file_size]
                     .copy_from_slice(&self.data[file_offset..file_offset + file_size]);
             }
+        }
+
+        // Update Bootinfo relying on UEFI running an identity mapping.
+        bootinfo.kernel_elf_start = PhysicalAddress::new(self.data.as_ptr() as _);
+        bootinfo.kernel_elf_size = self.data.len();
+        bootinfo.kernel_virt_phys_offset = _kernel_start.addr() - mem.as_ptr().addr();
+        #[cfg(target_arch = "x86_64")]
+        {
+            bootinfo.arch_bootinfo.uefi_cr3 = busyos::arch::amd64::paging::CR3::read();
+
+            // TODO(@MaxMade): Save address of GDT
+
+            // TODO(@MaxMade): Save address of IDT
         }
     }
 }
