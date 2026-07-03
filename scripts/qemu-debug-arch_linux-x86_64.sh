@@ -13,7 +13,6 @@ source -- "$SCRIPT_DIR/dependencies.sh"
 # Create esp/efi/boot
 TMP_DIR=$(mktemp -d)
 ESP_DIR="$TMP_DIR/esp"
-EFI_DIR="$TMP_DIR/esp/efi"
 BOOT_DIR="$TMP_DIR/esp/efi/boot"
 mkdir -p "$BOOT_DIR"
 
@@ -33,7 +32,7 @@ cp -- "$SCRIPT_DIR/../target/x86_64-unknown-none/debug/busyos" "$BOOT_DIR/busyos
 
 # Start tmux with QEMU+GDB
 tmux new-session -d -s busyos
-tmux send-keys -t busyos:0.0 "qemu-system-x86_64 -enable-kvm \
+tmux send-keys -t busyos:0.0 "qemu-system-x86_64 -enable-kvm -cpu host \
     -drive if=pflash,format=raw,readonly=on,file=\"$ESP_DIR/OVMF_CODE.fd\" \
     -drive if=pflash,format=raw,readonly=on,file=\"$ESP_DIR/OVMF_VARS.fd\" \
     -drive format=raw,file=fat:rw:\"$ESP_DIR\" \
