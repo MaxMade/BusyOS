@@ -8,6 +8,7 @@ pub mod x86_64;
 mod imp {
     pub use crate::arch::x86_64::bootinfo::*;
     pub use crate::arch::x86_64::elf::*;
+    pub use crate::arch::x86_64::features::*;
 }
 
 // Re-export without "::imp::*"

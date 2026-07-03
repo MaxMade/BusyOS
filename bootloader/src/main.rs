@@ -30,6 +30,9 @@ fn main() -> Status {
     // Update bootinformation
     crate::arch::update_bootinfo(&mut bootinfo);
 
+    // Check and active extensions
+    crate::arch::check_and_active_features();
+
     // Exit boot service.
     //
     // # Safety
