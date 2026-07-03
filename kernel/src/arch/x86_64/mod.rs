@@ -2,3 +2,4 @@
 pub mod paging;
 pub mod bootinfo;
 pub mod msr;
+pub mod cpuid;
