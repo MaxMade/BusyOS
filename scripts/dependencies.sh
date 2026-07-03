@@ -1,5 +1,7 @@
 #!/bin/env bash
 
+set -Eeuo pipefail
+
 # Directory of current script
 SCRIPT_DIR="$(dirname -- "${BASH_SOURCE[0]}")"
 source -- "$SCRIPT_DIR/common.sh"

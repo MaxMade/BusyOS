@@ -1,5 +1,10 @@
 #!/bin/env bash
 
+set -Eeuo pipefail
+
+# Default for QEMU_FLAGS
+QEMU_FLAGS="${QEMU_FLAGS:-}"
+
 # Check dependencies
 SCRIPT_DIR="$(dirname -- "${BASH_SOURCE[0]}")"
 source -- "$SCRIPT_DIR/common.sh"
@@ -33,7 +38,7 @@ tmux send-keys -t busyos:0.0 "qemu-system-x86_64 -enable-kvm \
     -drive if=pflash,format=raw,readonly=on,file=\"$ESP_DIR/OVMF_VARS.fd\" \
     -drive format=raw,file=fat:rw:\"$ESP_DIR\" \
     -s -S \
-    $qemu_FLAGS" Enter
+    $QEMU_FLAGS" Enter
 tmux split-window -h -t busyos:0
 tmux send-keys -t busyos:0.1 "gdb -ex 'target remote :1234'" Enter
 tmux attach-session -t busyos

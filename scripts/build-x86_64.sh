@@ -1,5 +1,7 @@
 #!/bin/env bash
 
+set -Eeuo pipefail
+
 # Build kernel
 echo "Building kernel..."
 cargo -Z unstable-options -C kernel build-x86_64
