@@ -151,6 +151,7 @@ impl ELF {
                     continue;
                 }
 
+                // Get offset relative to beginning of `mem`
                 let vaddr = VirtualAddress::new(program_header.p_vaddr as *mut c_void);
                 let memory_offset = match vaddr.addr().checked_sub(_kernel_start.addr()) {
                     Some(memory_offset) => memory_offset,
@@ -161,14 +162,76 @@ impl ELF {
                 let file_offset = program_header.p_offset as usize;
                 let file_size = program_header.p_filesz as usize;
 
+                // Sanity check:
+                let memory_size = program_header.p_memsz as usize;
+                if memory_size < file_size {
+                    panic!(
+                        "Detected suspicious segment: memory size ({}) <  file_size ({})",
+                        memory_size, file_size
+                    );
+                }
+
                 mem[memory_offset..memory_offset + file_size]
                     .copy_from_slice(&self.data[file_offset..file_offset + file_size]);
             }
         }
 
-        // Update Bootinfo relying on UEFI running an identity mapping.
+        // Update Bootinfo relying on UEFI running an identity mapping
         bootinfo.kernel_elf_start = PhysicalAddress::new(self.data.as_ptr() as _);
         bootinfo.kernel_elf_size = self.data.len();
         bootinfo.kernel_virt_phys_offset = _kernel_start.addr() - mem.as_ptr().addr();
+
+        // Update bootinfo based on ELF file
+        let _text_start = get_symbol_value("_text_start");
+        let _text_end = get_symbol_value("_text_end");
+        let text_size = _text_end.addr().checked_sub(_text_start.addr()).unwrap();
+        let _text_start = PhysicalAddress::new(
+            (mem.as_ptr().addr()
+                + _text_start
+                    .addr()
+                    .checked_sub(_kernel_start.addr())
+                    .unwrap()) as *mut c_void,
+        );
+        bootinfo.kernel_text_start = _text_start;
+        bootinfo.kernel_text_size = text_size;
+
+        let _rodata_start = get_symbol_value("_rodata_start");
+        let _rodata_end = get_symbol_value("_rodata_end");
+        let rodata_size = _rodata_end.addr().checked_sub(_rodata_start.addr()).unwrap();
+        let _rodata_start = PhysicalAddress::new(
+            (mem.as_ptr().addr()
+                + _rodata_start
+                    .addr()
+                    .checked_sub(_kernel_start.addr())
+                    .unwrap()) as *mut c_void,
+        );
+        bootinfo.kernel_rodata_start = _rodata_start;
+        bootinfo.kernel_rodata_size = rodata_size;
+
+        let _data_start = get_symbol_value("_data_start");
+        let _data_end = get_symbol_value("_data_end");
+        let data_size = _data_end.addr().checked_sub(_data_start.addr()).unwrap();
+        let _data_start = PhysicalAddress::new(
+            (mem.as_ptr().addr()
+                + _data_start
+                    .addr()
+                    .checked_sub(_kernel_start.addr())
+                    .unwrap()) as *mut c_void,
+        );
+        bootinfo.kernel_data_start = _data_start;
+        bootinfo.kernel_data_size = data_size;
+
+        let _bss_start = get_symbol_value("_bss_start");
+        let _bss_end = get_symbol_value("_bss_end");
+        let bss_size = _bss_end.addr().checked_sub(_bss_start.addr()).unwrap();
+        let _bss_start = PhysicalAddress::new(
+            (mem.as_ptr().addr()
+                + _bss_start
+                    .addr()
+                    .checked_sub(_kernel_start.addr())
+                    .unwrap()) as *mut c_void,
+        );
+        bootinfo.kernel_bss_start = _bss_start;
+        bootinfo.kernel_bss_size = bss_size;
     }
 }

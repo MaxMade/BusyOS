@@ -16,6 +16,30 @@ pub struct Bootinfo {
     /// Size of the kernel ELF file in physical memory.
     pub kernel_elf_size: usize,
 
+    /// Physical address of the kernel `.text` segment.
+    pub kernel_text_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel `.text` segment.
+    pub kernel_text_size: usize,
+
+    /// Physical address of the kernel `.rodata` segment.
+    pub kernel_rodata_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel `.rodata` segment.
+    pub kernel_rodata_size: usize,
+
+    /// Physical address of the kernel `.data` segment.
+    pub kernel_data_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel `.data` segment.
+    pub kernel_data_size: usize,
+
+    /// Physical address of the kernel `.bss` segment.
+    pub kernel_bss_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel `.bss` segment.
+    pub kernel_bss_size: usize,
+
     /// Architecture-specific boot information
     pub arch_bootinfo: ArchBootinfo,
 }
@@ -27,6 +51,14 @@ impl Default for Bootinfo {
             kernel_elf_start: PhysicalAddress::new(ptr::null_mut()),
             kernel_elf_size: 0,
             arch_bootinfo: Default::default(),
+            kernel_text_start: PhysicalAddress::new(ptr::null_mut()),
+            kernel_text_size: 0,
+            kernel_rodata_start: PhysicalAddress::new(ptr::null_mut()),
+            kernel_rodata_size: 0,
+            kernel_data_start: PhysicalAddress::new(ptr::null_mut()),
+            kernel_data_size: 0,
+            kernel_bss_start: PhysicalAddress::new(ptr::null_mut()),
+            kernel_bss_size: 0,
         }
     }
 }
