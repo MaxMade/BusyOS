@@ -9,7 +9,10 @@ use crate::{
         AccessRights, Error as PagingError, PageFrameAllocator, PageSize, Paging, PhysicalAddress,
         PrivilegeLevel, VirtualAddress,
     },
-    kernel::locking::{CanAcquire, PreviousToken, level},
+    kernel::{
+        bootinfo::Bootinfo,
+        locking::{CanAcquire, PreviousToken, level},
+    },
 };
 
 /// Number of bits to shift a page frame number to obtain a physical address
@@ -1174,6 +1177,220 @@ pub struct PageTables<PFA: PageFrameAllocator> {
 }
 
 impl<PFA: PageFrameAllocator> PageTables<PFA> {
+    /// Creates the initial kernel page table.
+    /// 
+    /// # Address Space Layout
+    /// 
+    /// ```text
+    /// ┌─────────────────────────────────────────────────────────┐
+    /// │ 0x0000_0000_0000_0000                                   │
+    /// │                                                         │
+    /// │                                     Userspace (128 TiB) │
+    /// │                               64 TiB canonical / usable │
+    /// │                                                         │
+    /// │ 0x0000_7FFF_FFFF_FFFF                                   │
+    /// ├╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤
+    /// │ 0x0000_8000_0000_0000                                   │
+    /// │                                                         │
+    /// │                            Non-canonical hole (~16 EiB) │
+    /// │                    bits [63:48] must sign-extend bit 47 │
+    /// │                                                         │
+    /// │ 0xFFFF_7FFF_FFFF_FFFF                                   │
+    /// ├─────────────────────────────────────────────────────────┤
+    /// │ 0xFFFF_8000_0000_0000       ┐                           │
+    /// │                             │                           │
+    /// │  ┌───────────────────────┐  │                           │
+    /// │  │ 0xFFFF_8000_0000_0000 │  │                           │
+    /// │  │                       │  │     Kernelspace (128 TiB) │
+    /// │  │   Kernel image        │  │                           │
+    /// │  │   .text / .rodata     │  │                           │
+    /// │  │   .data  / .bss       │  │                           │
+    /// │  │   stack  / heap       │  │                           │
+    /// │  │                       │  │                           │
+    /// │  │        64 TiB         │  │                           │
+    /// │  │                       │  │                           │
+    /// │  │ 0xFFFF_BFFF_FFFF_FFFF │  │                           │
+    /// │  ├───────────────────────┤  │                           │
+    /// │  │ 0xFFFF_C000_0000_0000 │  │                           │
+    /// │  │                       │  │                           │
+    /// │  │  Physical memory map  │  │                           │
+    /// │  │  (direct map of all   │  │                           │
+    /// │  │   physical RAM)       │  │                           │
+    /// │  │                       │  │                           │
+    /// │  │        64 TiB         │  │                           │
+    /// │  │                       │  │                           │
+    /// │  │ 0xFFFF_FFFF_FFFF_FFFF │  │                           │
+    /// │  └───────────────────────┘  │                           │
+    /// │                             │                           │
+    /// │ 0xFFFF_FFFF_FFFF_FFFF       ┘                           │
+    /// └─────────────────────────────────────────────────────────┘
+    /// ```
+    pub fn kernel_mapping<Token>(
+        bootinfo: &Bootinfo,
+        token: Token,
+    ) -> Result<(Self, Token), (PagingError, Token)>
+    where
+        Token: CanAcquire<level::MemoryManagement> + PreviousToken,
+    {
+        // Create empty page tables
+        let mut page_tables = Self {
+            cr3: CR3::new(),
+            phantom: PhantomData,
+            page_table_shift: 0xffff_c000_0000_0000,
+        };
+
+        // Declare helper function
+        let try_map = |page_tables: &mut Self,
+                       virt_addr: VirtualAddress<c_void>,
+                       phys_addr: PhysicalAddress<c_void>,
+                       len: usize,
+                       access_rights: AccessRights,
+                       mut token: Token|
+         -> Result<Token, (PagingError, Token)> {
+            // Sanity check:
+            if (virt_addr.addr() % REGULAR_PAGE_SIZE) != 0 {
+                panic!("Input virtual address must be aligned!");
+            }
+            if (phys_addr.addr() % REGULAR_PAGE_SIZE) != 0 {
+                panic!("Input physical address must be aligned!");
+            }
+            if (len % REGULAR_PAGE_SIZE) != 0 {
+                panic!("Mapped range must be a multiple of the page size!");
+            }
+
+            let mut offset = 0;
+            'outer: while offset < len {
+                let remaining = len - offset;
+
+                // Try different page size
+                for (size, page_size) in [
+                    (GIGANTIC_PAGE_SIZE.unwrap(), PageSize::Gigantic),
+                    (HUGE_PAGE_SIZE.unwrap(), PageSize::Huge),
+                    (REGULAR_PAGE_SIZE, PageSize::Regular),
+                ] {
+                    if (virt_addr.addr() + offset) % size == 0
+                        && (phys_addr.addr() + offset) % size == 0
+                        && remaining >= size
+                    {
+                        let previous;
+                        (previous, token) = unsafe {
+                            page_tables.map(
+                                virt_addr.byte_add(offset),
+                                phys_addr.byte_add(offset),
+                                PrivilegeLevel::Kernel,
+                                access_rights,
+                                page_size,
+                                token,
+                            )?
+                        };
+                        assert!(previous.is_none());
+
+                        offset += size;
+                        continue 'outer;
+                    }
+                }
+                unreachable!();
+            }
+
+            Ok(token)
+        };
+
+        // Create physical memory map
+        let token = match try_map(
+            &mut page_tables,
+            VirtualAddress::new(0xFFFF_C000_0000_0000u64 as _),
+            PhysicalAddress::new(0x0000_0000_0000_0000u64 as _),
+            64usize * 1024 * 1024 * 1024 * 1024,
+            AccessRights::custom(true, true, false),
+            token,
+        ) {
+            Ok(token) => token,
+            Err((error, mut token)) => {
+                // Free page tables
+                token = unsafe { page_tables.destroy(|_, _, token| token, token) };
+                return Err((error, token));
+            }
+        };
+
+        // Map .text segment
+        let token = match try_map(
+            &mut page_tables,
+            VirtualAddress::new(
+                (bootinfo.kernel_text_start.addr() + bootinfo.kernel_virt_phys_offset) as _,
+            ),
+            bootinfo.kernel_text_start,
+            bootinfo.kernel_text_size,
+            AccessRights::custom(true, false, true),
+            token,
+        ) {
+            Ok(token) => token,
+            Err((error, mut token)) => {
+                // Free page tables
+                token = unsafe { page_tables.destroy(|_, _, token| token, token) };
+                return Err((error, token));
+            }
+        };
+
+        // Map .rodata segment
+        let token = match try_map(
+            &mut page_tables,
+            VirtualAddress::new(
+                (bootinfo.kernel_rodata_start.addr() + bootinfo.kernel_virt_phys_offset) as _,
+            ),
+            bootinfo.kernel_rodata_start,
+            bootinfo.kernel_rodata_size,
+            AccessRights::custom(true, false, false),
+            token,
+        ) {
+            Ok(token) => token,
+            Err((error, mut token)) => {
+                // Free page tables
+                token = unsafe { page_tables.destroy(|_, _, token| token, token) };
+                return Err((error, token));
+            }
+        };
+
+        // Map .data segment
+        let token = match try_map(
+            &mut page_tables,
+            VirtualAddress::new(
+                (bootinfo.kernel_data_start.addr() + bootinfo.kernel_virt_phys_offset) as _,
+            ),
+            bootinfo.kernel_data_start,
+            bootinfo.kernel_data_size,
+            AccessRights::custom(true, true, false),
+            token,
+        ) {
+            Ok(token) => token,
+            Err((error, mut token)) => {
+                // Free page tables
+                token = unsafe { page_tables.destroy(|_, _, token| token, token) };
+                return Err((error, token));
+            }
+        };
+
+        // Map .bss segment
+        let token = match try_map(
+            &mut page_tables,
+            VirtualAddress::new(
+                (bootinfo.kernel_bss_start.addr() + bootinfo.kernel_virt_phys_offset) as _,
+            ),
+            bootinfo.kernel_bss_start,
+            bootinfo.kernel_bss_size,
+            AccessRights::custom(true, true, false),
+            token,
+        ) {
+            Ok(token) => token,
+            Err((error, mut token)) => {
+                // Free page tables
+                token = unsafe { page_tables.destroy(|_, _, token| token, token) };
+                return Err((error, token));
+            }
+        };
+
+        Ok((page_tables, token))
+    }
+
     /// Checkes if a virtual address is canonical.
     ///
     /// For x86_64, the most significant 16 bits of any virtual address, bits 48
