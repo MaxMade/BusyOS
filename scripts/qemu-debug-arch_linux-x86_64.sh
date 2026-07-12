@@ -32,12 +32,12 @@ cp -- "$SCRIPT_DIR/../target/x86_64-unknown-none/debug/busyos" "$BOOT_DIR/busyos
 
 # Start tmux with QEMU+GDB
 tmux new-session -d -s busyos
-tmux send-keys -t busyos:0.0 "qemu-system-x86_64 -enable-kvm -cpu host \
+tmux send-keys -t busyos:0.0 "qemu-system-x86_64 -cpu max,+pdpe1gb \
     -drive if=pflash,format=raw,readonly=on,file=\"$ESP_DIR/OVMF_CODE.fd\" \
     -drive if=pflash,format=raw,readonly=on,file=\"$ESP_DIR/OVMF_VARS.fd\" \
     -drive format=raw,file=fat:rw:\"$ESP_DIR\" \
-    -s -S \
-    $QEMU_FLAGS" Enter
+    -d int,cpu_reset,guest_errors -D qemu.log \
+    -s -S $QEMU_FLAGS" Enter
 tmux split-window -h -t busyos:0
 tmux send-keys -t busyos:0.1 "gdb -ex 'target remote :1234'" Enter
 tmux attach-session -t busyos

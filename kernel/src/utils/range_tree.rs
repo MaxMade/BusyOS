@@ -577,7 +577,7 @@ where
         Token: CanAcquire<ID::Level> + PreviousToken,
     {
         let mut token = token;
- 
+
         match self.0.find(|other| {
             if Range::overlap(&range, other) {
                 return Ordering::Equal;
@@ -589,7 +589,7 @@ where
                 let other = *other;
                 (success, token) = self.0.remove(&other, token);
                 assert!(success);
- 
+
                 // FIX: split_off(other, range) — subtract the query FROM the
                 // stored entry to obtain the surviving pieces.
                 match Range::split_off(other, range) {
@@ -612,10 +612,10 @@ where
                     SplittedRange::Two(range_0, range_1) => {
                         let (present, token) = self.0.try_insert(range_0, token)?;
                         assert!(!present);
- 
+
                         let (present, token) = self.0.try_insert(range_1, token)?;
                         assert!(!present);
- 
+
                         Ok(token)
                     }
                 }
@@ -630,7 +630,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{kernel::locking::{EpilogueLevel, MemoryManagementLevelID, RootToken}, utils::testing::HeapAllocator};
+    use crate::{
+        kernel::locking::{EpilogueLevel, MemoryManagementLevelID, RootToken},
+        utils::testing::HeapAllocator,
+    };
 
     use super::*;
 
@@ -663,17 +666,17 @@ mod tests {
     }
 
     type RT = RangeTree<u64, u64, MemoryManagementLevelID, HeapAllocator>;
- 
+
     fn new_tree() -> RT {
         RangeTree::new_in(HeapAllocator)
     }
- 
+
     /// Collect the stored ranges in sorted order as `(base, length)` pairs.
     /// Used for concise assertions throughout the test suite.
     fn entries(t: &RT) -> std::vec::Vec<(u64, u64)> {
         t.0.iter().map(|r| (r.base(), r.length())).collect()
     }
- 
+
     macro_rules! add {
         ($tree:expr, $base:expr, $len:expr, $tok:expr) => {
             $tree
@@ -681,7 +684,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("add() returned AllocError"))
         };
     }
- 
+
     macro_rules! rm {
         ($tree:expr, $base:expr, $len:expr, $tok:expr) => {
             $tree
@@ -689,7 +692,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("remove() returned AllocError"))
         };
     }
- 
+
     #[test]
     fn accessors() {
         let range = r(100, 50);
@@ -972,38 +975,38 @@ mod tests {
     // -------------------------------------------------------------------------
     // add()
     // -------------------------------------------------------------------------
- 
+
     /// Inserting into an empty tree stores the range verbatim.
     #[test]
     fn add_into_empty_tree() {
         let root = unsafe { RootToken::forge() };
         let (level, token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         let token = add!(t, 100, 100, token); // [100, 200[
- 
+
         assert_eq!(entries(&t), [(100, 100)]);
         let token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// Two non-overlapping, non-adjacent ranges are stored independently.
     #[test]
     fn add_two_disjoint_ranges() {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
         token = add!(t, 300, 100, token); // [300, 400[
- 
+
         assert_eq!(entries(&t), [(100, 100), (300, 100)]);
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// `overlap()` uses a strict `<`, so adjacent ranges (which share only a
     /// single boundary point) are stored as two separate entries rather than
     /// being merged.
@@ -1012,16 +1015,16 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
         token = add!(t, 200, 100, token); // [200, 300[ — touches at 200, no overlap
- 
+
         assert_eq!(entries(&t), [(100, 100), (200, 100)]);
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// A new range that partially overlaps the right side of a stored entry
     /// causes the two to be merged.
     #[test]
@@ -1029,16 +1032,16 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
         token = add!(t, 150, 150, token); // [150, 300[ — overlaps right part
- 
+
         assert_eq!(entries(&t), [(100, 200)]); // [100, 300[
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// A new range that partially overlaps the left side of a stored entry
     /// causes the two to be merged.
     #[test]
@@ -1046,16 +1049,16 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 200, 100, token); // [200, 300[
         token = add!(t, 100, 150, token); // [100, 250[ — overlaps left part
- 
+
         assert_eq!(entries(&t), [(100, 200)]); // [100, 300[
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// Adding a range that lies entirely inside an existing stored entry is a
     /// no-op: the stored entry already covers it.
     #[test]
@@ -1063,32 +1066,32 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 200, token); // [100, 300[
-        token = add!(t, 150,  50, token); // [150, 200[ — entirely inside
- 
+        token = add!(t, 150, 50, token); // [150, 200[ — entirely inside
+
         assert_eq!(entries(&t), [(100, 200)]);
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// A new range that completely covers an existing entry absorbs it.
     #[test]
     fn add_completely_covers_existing() {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
-        token = add!(t, 150,  50, token); // [150, 200[
+
+        token = add!(t, 150, 50, token); // [150, 200[
         token = add!(t, 100, 200, token); // [100, 300[ — covers existing
- 
+
         assert_eq!(entries(&t), [(100, 200)]); // [100, 300[
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// Adding a range that overlaps two previously separate entries merges all
     /// three into one.
     #[test]
@@ -1096,17 +1099,17 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
         token = add!(t, 300, 100, token); // [300, 400[
         token = add!(t, 150, 200, token); // [150, 350[ — overlaps both
- 
+
         assert_eq!(entries(&t), [(100, 300)]); // [100, 400[
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// Adding a single range that overlaps three separate entries merges all
     /// of them in one call.
     #[test]
@@ -1114,52 +1117,52 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
-        token = add!(t,   0, 100, token); // [0,   100[
+
+        token = add!(t, 0, 100, token); // [0,   100[
         token = add!(t, 200, 100, token); // [200, 300[
         token = add!(t, 400, 100, token); // [400, 500[
-        token = add!(t,  50, 400, token); // [50,  450[ — overlaps all three
- 
+        token = add!(t, 50, 400, token); // [50,  450[ — overlaps all three
+
         assert_eq!(entries(&t), [(0, 500)]); // [0, 500[
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     // -----------------------------------------------------------------------=-
     // remove()
     // -----------------------------------------------------------------------=-
- 
+
     /// Removing a range with no overlap against any stored entry is a no-op.
     #[test]
     fn remove_no_match_is_noop() {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
-        token = rm! (t, 300,  50, token); // [300, 350[ — no overlap
- 
+        token = rm!(t, 300, 50, token); // [300, 350[ — no overlap
+
         assert_eq!(entries(&t), [(100, 100)]);
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// Removing from an empty tree does nothing.
     #[test]
     fn remove_from_empty_tree_is_noop() {
         let root = unsafe { RootToken::forge() };
         let (level, token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         let token = rm!(t, 100, 100, token);
- 
+
         assert!(t.is_empty());
         drop(t);
         level.leave(token);
     }
- 
+
     /// A query adjacent to a stored entry (but not overlapping) leaves it
     /// untouched.
     #[test]
@@ -1167,48 +1170,48 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
-        token = rm! (t, 200,  50, token); // [200, 250[ — adjacent, not overlapping
- 
+        token = rm!(t, 200, 50, token); // [200, 250[ — adjacent, not overlapping
+
         assert_eq!(entries(&t), [(100, 100)]);
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// Removing a range that exactly matches a stored entry empties the tree.
     #[test]
     fn remove_exact_match_removes_entry() {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token);
-        token = rm! (t, 100, 100, token);
- 
+        token = rm!(t, 100, 100, token);
+
         assert!(t.is_empty());
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// A query that completely covers a stored entry removes it entirely.
     #[test]
     fn remove_query_covers_stored_entry() {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
-        token = rm! (t,  50, 200, token); // [50, 250[ — covers entirely
- 
+        token = rm!(t, 50, 200, token); // [50, 250[ — covers entirely
+
         assert!(t.is_empty());
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// A query that overlaps only the left part of a stored entry leaves the
     /// right remainder.
     #[test]
@@ -1216,16 +1219,16 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
-        token = rm! (t, 100,  50, token); // remove [100, 150[
- 
+        token = rm!(t, 100, 50, token); // remove [100, 150[
+
         assert_eq!(entries(&t), [(150, 50)]); // [150, 200[
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// A query that overlaps only the right part of a stored entry leaves the
     /// left remainder.
     #[test]
@@ -1233,32 +1236,32 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
-        token = rm! (t, 150,  50, token); // remove [150, 200[
- 
+        token = rm!(t, 150, 50, token); // remove [150, 200[
+
         assert_eq!(entries(&t), [(100, 50)]); // [100, 150[
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// A query strictly inside a stored entry splits it into two remainders.
     #[test]
     fn remove_punches_hole_in_middle() {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
-        token = rm! (t, 130,  40, token); // remove [130, 170[
- 
+        token = rm!(t, 130, 40, token); // remove [130, 170[
+
         assert_eq!(entries(&t), [(100, 30), (170, 30)]); // [100,130[ + [170,200[
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// A removal only affects the entry that overlaps the query; all other
     /// stored entries are untouched.
     #[test]
@@ -1266,37 +1269,37 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token); // [100, 200[
         token = add!(t, 300, 100, token); // [300, 400[
-        token = rm! (t, 130,  40, token); // only overlaps [100, 200[
- 
+        token = rm!(t, 130, 40, token); // only overlaps [100, 200[
+
         assert_eq!(entries(&t), [(100, 30), (170, 30), (300, 100)]);
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     // -----------------------------------------------------------------------=-
     // round-trips
     // -----------------------------------------------------------------------=-
- 
+
     /// add followed by remove of the exact same range restores the empty state.
     #[test]
     fn add_then_remove_exact_roundtrip() {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
+
         token = add!(t, 100, 100, token);
-        token = rm! (t, 100, 100, token);
- 
+        token = rm!(t, 100, 100, token);
+
         assert!(t.is_empty());
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
     }
- 
+
     /// Removing a large range in three non-overlapping slices ultimately
     /// empties the tree.
     #[test]
@@ -1304,12 +1307,12 @@ mod tests {
         let root = unsafe { RootToken::forge() };
         let (level, mut token) = EpilogueLevel::enter(root);
         let mut t = new_tree();
- 
-        token = add!(t,   0, 300, token); // [0, 300[
-        token = rm! (t,   0, 100, token); // remove [0,   100[
-        token = rm! (t, 100, 100, token); // remove [100, 200[
-        token = rm! (t, 200, 100, token); // remove [200, 300[
- 
+
+        token = add!(t, 0, 300, token); // [0, 300[
+        token = rm!(t, 0, 100, token); // remove [0,   100[
+        token = rm!(t, 100, 100, token); // remove [100, 200[
+        token = rm!(t, 200, 100, token); // remove [200, 300[
+
         assert!(t.is_empty());
         token = t.0.clear(token);
         drop(t);

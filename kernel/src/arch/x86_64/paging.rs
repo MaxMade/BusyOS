@@ -1177,10 +1177,88 @@ pub struct PageTables<PFA: PageFrameAllocator> {
 }
 
 impl<PFA: PageFrameAllocator> PageTables<PFA> {
-    /// Creates the initial kernel page table.
-    /// 
+    /// Creates temporary kernel page tables for jumping to upper half of
+    /// address space.
+    ///
+    /// Maps the first 512 GiB of physical memory (`0x0`..`0x80_0000_0000`)
+    /// to the higher-half base at `0xFFFF_8000_0000_0000`, using 1 GiB
+    /// gigantic pages. Intended only as a trampoline for the jump to the
+    /// higher half; tear down with [`destroy`] once the real kernel mapping
+    /// is active.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that every allocated page frame using
+    /// `PFA::allocate` is currently identify mapped.
+    pub unsafe fn temporary_upper_half<Token>(
+        token: Token,
+    ) -> Result<(Self, Token), (PagingError, Token)>
+    where
+        Token: CanAcquire<level::MemoryManagement> + PreviousToken,
+    {
+        let mut token = token;
+
+        let mut page_tables = PageTables {
+            cr3: CR3::new(),
+            phantom: PhantomData,
+            page_table_shift: 0x0,
+        };
+
+        for i in 0..512 {
+            let step = GIGANTIC_PAGE_SIZE.unwrap() as u64;
+            let phys_addr = PhysicalAddress::new((i * step) as *mut c_void);
+            let virt_addr_lower = VirtualAddress::new((i * step) as *mut c_void);
+            let virt_addr_upper =
+                VirtualAddress::new((0xffff_8000_0000_0000u64 + i * step) as *mut c_void);
+
+            token = match unsafe {
+                page_tables.map(
+                    virt_addr_lower,
+                    phys_addr,
+                    PrivilegeLevel::Kernel,
+                    AccessRights::full(),
+                    PageSize::Gigantic,
+                    token,
+                )
+            } {
+                Ok((previous, token)) => {
+                    assert!(previous.is_none());
+                    token
+                }
+                Err((error, mut token)) => {
+                    token = unsafe { page_tables.destroy(|_, _, token| token, token) };
+                    return Err((error, token));
+                }
+            };
+
+            token = match unsafe {
+                page_tables.map(
+                    virt_addr_upper,
+                    phys_addr,
+                    PrivilegeLevel::Kernel,
+                    AccessRights::full(),
+                    PageSize::Gigantic,
+                    token,
+                )
+            } {
+                Ok((previous, token)) => {
+                    assert!(previous.is_none());
+                    token
+                }
+                Err((error, mut token)) => {
+                    token = unsafe { page_tables.destroy(|_, _, token| token, token) };
+                    return Err((error, token));
+                }
+            };
+        }
+
+        Ok((page_tables, token))
+    }
+
+    /// Creates the initial kernel page tables.
+    ///
     /// # Address Space Layout
-    /// 
+    ///
     /// ```text
     /// ┌─────────────────────────────────────────────────────────┐
     /// │ 0x0000_0000_0000_0000                                   │

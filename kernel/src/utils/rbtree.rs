@@ -871,8 +871,8 @@ mod test {
     use std::collections::BTreeMap;
     use std::vec::Vec;
 
-    use crate::kernel::locking::{EpilogueLevel, RootToken};
     use crate::kernel::locking::MemoryManagementLevelID;
+    use crate::kernel::locking::{EpilogueLevel, RootToken};
     use crate::utils::testing::HeapAllocator;
 
     use super::*;

@@ -1,5 +1,5 @@
 fn main() {
-    #[cfg(not(feature = "unittest"))] 
+    #[cfg(not(feature = "unittest"))]
     {
         #[cfg(target_arch = "x86_64")]
         {

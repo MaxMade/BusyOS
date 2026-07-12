@@ -216,7 +216,10 @@ impl ELF {
 
         let _rodata_start = get_symbol_value("_rodata_start");
         let _rodata_end = get_symbol_value("_rodata_end");
-        let rodata_size = _rodata_end.addr().checked_sub(_rodata_start.addr()).unwrap();
+        let rodata_size = _rodata_end
+            .addr()
+            .checked_sub(_rodata_start.addr())
+            .unwrap();
         let _rodata_start = PhysicalAddress::new(
             (mem.as_ptr().addr()
                 + _rodata_start
@@ -244,11 +247,8 @@ impl ELF {
         let _bss_end = get_symbol_value("_bss_end");
         let bss_size = _bss_end.addr().checked_sub(_bss_start.addr()).unwrap();
         let _bss_start = PhysicalAddress::new(
-            (mem.as_ptr().addr()
-                + _bss_start
-                    .addr()
-                    .checked_sub(_kernel_start.addr())
-                    .unwrap()) as *mut c_void,
+            (mem.as_ptr().addr() + _bss_start.addr().checked_sub(_kernel_start.addr()).unwrap())
+                as *mut c_void,
         );
         bootinfo.kernel_bss_start = _bss_start;
         bootinfo.kernel_bss_size = bss_size;

@@ -2,7 +2,10 @@
 
 use core::{alloc::Layout, ptr::NonNull};
 
-use crate::{kernel::locking::{CanAcquire, LockId, MemoryManagementLevelID, PreviousToken}, utils::allocator::{Allocator, Error as AllocatorError}};
+use crate::{
+    kernel::locking::{CanAcquire, LockId, MemoryManagementLevelID, PreviousToken},
+    utils::allocator::{Allocator, Error as AllocatorError},
+};
 
 /// Heap-backed allocator for testing using the token system.
 pub struct HeapAllocator;
@@ -37,4 +40,3 @@ unsafe impl Allocator<MemoryManagementLevelID> for HeapAllocator {
         token
     }
 }
-
