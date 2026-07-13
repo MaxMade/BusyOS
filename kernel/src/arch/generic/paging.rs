@@ -390,6 +390,12 @@ pub trait PageFrameAllocator {
 /// safety globally: a bad mapping can corrupt kernel or user memory, cause
 /// undefined behaviour on the next memory access, or crash the system.
 pub trait Paging<PFA: PageFrameAllocator> {
+    /// Gets the actual page size for [`PageSize`].
+    ///
+    /// If the target architecture supports the given page size, its size in
+    /// bytes is returned. Otherwise, `None` is returned.
+    fn page_size(page_size: PageSize) -> Option<usize>;
+
     /// Destroys the page tables and frees all associated page table frames.
     ///
     /// This must be called instead of letting [`Paging`] drop, since

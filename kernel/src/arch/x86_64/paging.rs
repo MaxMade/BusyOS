@@ -20,21 +20,21 @@ use crate::{
 pub const REGULAR_PAGE_SHIFT: usize = 12;
 
 /// Number of bits to shift a page frame number to obtain a physical address
-/// for a huge (2 MiB) page, if supported.
-pub const HUGE_PAGE_SHIFT: Option<usize> = Some(9 + 12);
+/// for a huge (2 MiB) page.
+pub const HUGE_PAGE_SHIFT: usize = 9 + 12;
 
 /// Number of bits to shift a page frame number to obtain a physical address
-/// for a gigantic (1 GiB) page, if supported.
-pub const GIGANTIC_PAGE_SHIFT: Option<usize> = Some(9 + 9 + 12);
+/// for a gigantic (1 GiB) page.
+pub const GIGANTIC_PAGE_SHIFT: usize = 9 + 9 + 12;
 
 /// Regular page size (4 KiB).
 pub const REGULAR_PAGE_SIZE: usize = 4096;
 
-/// Huge page size (2 MiB), if supported.
-pub const HUGE_PAGE_SIZE: Option<usize> = Some(512 * REGULAR_PAGE_SIZE);
+/// Huge page size (2 MiB).
+pub const HUGE_PAGE_SIZE: usize = ENTRIES_PER_TABLE * REGULAR_PAGE_SIZE;
 
-/// Gigantic page size (1 GiB), if supported.
-pub const GIGANTIC_PAGE_SIZE: Option<usize> = Some(512 * 512 * REGULAR_PAGE_SIZE);
+/// Gigantic page size (1 GiB).
+pub const GIGANTIC_PAGE_SIZE: usize = ENTRIES_PER_TABLE * ENTRIES_PER_TABLE * REGULAR_PAGE_SIZE;
 
 /// Number of entries per page table.
 const ENTRIES_PER_TABLE: usize = 512;
@@ -621,7 +621,7 @@ impl Display for PDPEntry {
                     self.dirty(),
                     self.global(),
                     self.available_0(),
-                    self.addr() << GIGANTIC_PAGE_SHIFT.unwrap() as u64,
+                    self.addr() << GIGANTIC_PAGE_SHIFT as u64,
                     self.available_1(),
                     self.no_execute(),
                 ),
@@ -688,7 +688,7 @@ impl PageTableEntry for PDPEntry {
         match self.gigantic_page() {
             false => PageTableTarget::PageTable(PhysicalAddress::new(addr as _)),
             true => {
-                let aligned = addr & !(GIGANTIC_PAGE_SIZE.unwrap() as u64 - 1);
+                let aligned = addr & !(GIGANTIC_PAGE_SIZE as u64 - 1);
                 PageTableTarget::Page(PhysicalAddress::new(aligned as _))
             }
         }
@@ -706,7 +706,7 @@ impl PageTableEntry for PDPEntry {
             }
             PageTableTarget::Page(phys_addr) => {
                 assert!(
-                    phys_addr.addr() % GIGANTIC_PAGE_SIZE.unwrap() == 0,
+                    phys_addr.addr() % GIGANTIC_PAGE_SIZE == 0,
                     "gigantic page address must be 1 GiB aligned"
                 );
                 PDPEntry::set_gigantic_page(self, true);
@@ -850,7 +850,7 @@ impl Display for PDEntry {
                     self.dirty(),
                     self.global(),
                     self.available_0(),
-                    self.addr() << HUGE_PAGE_SHIFT.unwrap() as u64,
+                    self.addr() << HUGE_PAGE_SHIFT as u64,
                     self.available_1(),
                     self.no_execute(),
                 ),
@@ -917,7 +917,7 @@ impl PageTableEntry for PDEntry {
         match self.huge_page() {
             false => PageTableTarget::PageTable(PhysicalAddress::new(addr as _)),
             true => {
-                let aligned = addr & !(HUGE_PAGE_SIZE.unwrap() as u64 - 1);
+                let aligned = addr & !(HUGE_PAGE_SIZE as u64 - 1);
                 PageTableTarget::Page(PhysicalAddress::new(aligned as _))
             }
         }
@@ -935,7 +935,7 @@ impl PageTableEntry for PDEntry {
             }
             PageTableTarget::Page(phys_addr) => {
                 assert!(
-                    phys_addr.addr() % HUGE_PAGE_SIZE.unwrap() == 0,
+                    phys_addr.addr() % HUGE_PAGE_SIZE == 0,
                     "huge page address must be 2 MiB aligned"
                 );
                 PDEntry::set_huge_page(self, true);
@@ -1204,8 +1204,8 @@ impl<PFA: PageFrameAllocator> PageTables<PFA> {
             page_table_shift: 0x0,
         };
 
-        for i in 0..512 {
-            let step = GIGANTIC_PAGE_SIZE.unwrap() as u64;
+        for i in 0..ENTRIES_PER_TABLE as u64 {
+            let step = GIGANTIC_PAGE_SIZE as u64;
             let phys_addr = PhysicalAddress::new((i * step) as *mut c_void);
             let virt_addr_lower = VirtualAddress::new((i * step) as *mut c_void);
             let virt_addr_upper =
@@ -1342,8 +1342,8 @@ impl<PFA: PageFrameAllocator> PageTables<PFA> {
 
                 // Try different page size
                 for (size, page_size) in [
-                    (GIGANTIC_PAGE_SIZE.unwrap(), PageSize::Gigantic),
-                    (HUGE_PAGE_SIZE.unwrap(), PageSize::Huge),
+                    (GIGANTIC_PAGE_SIZE, PageSize::Gigantic),
+                    (HUGE_PAGE_SIZE, PageSize::Huge),
                     (REGULAR_PAGE_SIZE, PageSize::Regular),
                 ] {
                     if (virt_addr.addr() + offset) % size == 0
@@ -1527,6 +1527,14 @@ impl<PFA: PageFrameAllocator> PageTables<PFA> {
 }
 
 impl<PFA: PageFrameAllocator> Paging<PFA> for PageTables<PFA> {
+    fn page_size(page_size: PageSize) -> Option<usize> {
+        match page_size {
+            PageSize::Regular => Some(REGULAR_PAGE_SIZE),
+            PageSize::Huge => Some(HUGE_PAGE_SIZE),
+            PageSize::Gigantic => Some(GIGANTIC_PAGE_SIZE),
+        }
+    }
+
     /// Destroys the page tables and frees all associated page table frames.
     ///
     /// This must be called instead of letting [`PageTables`] drop, since
@@ -2370,8 +2378,8 @@ mod test {
         fn next_virtual_addr(page_size: PageSize) -> VirtualAddress<c_void> {
             let size = match page_size {
                 PageSize::Regular => REGULAR_PAGE_SIZE,
-                PageSize::Huge => HUGE_PAGE_SIZE.unwrap(),
-                PageSize::Gigantic => GIGANTIC_PAGE_SIZE.unwrap(),
+                PageSize::Huge => HUGE_PAGE_SIZE,
+                PageSize::Gigantic => GIGANTIC_PAGE_SIZE,
             };
 
             let mut prev = PAGE_FRAME_ADDR.load(AtomicOrdering::Relaxed);
@@ -2409,8 +2417,8 @@ mod test {
             // Allocate page frame
             let size = match page_size {
                 PageSize::Regular => REGULAR_PAGE_SIZE,
-                PageSize::Huge => HUGE_PAGE_SIZE.unwrap(),
-                PageSize::Gigantic => GIGANTIC_PAGE_SIZE.unwrap(),
+                PageSize::Huge => HUGE_PAGE_SIZE,
+                PageSize::Gigantic => GIGANTIC_PAGE_SIZE,
             };
 
             let map_flags = match page_size {
