@@ -176,6 +176,25 @@ impl ELF {
             }
         }
 
+        // Resolve relocations
+        if let Some(section_headers) = elf.section_headers() {
+            for section in section_headers.iter() {
+                // Try to resolve REL
+                if let Ok(rels) = elf.section_data_as_rels(&section) {
+                    for rel in rels {
+                        todo!("Handle relocation: {:?}", rel);
+                    }
+                }
+
+                // Try to resolve RELA
+                if let Ok(relas) = elf.section_data_as_relas(&section) {
+                    for rela in relas {
+                        todo!("Handle relocation (with addend): {:?}", rela);
+                    }
+                }
+            }
+        }
+
         // Update Bootinfo relying on UEFI running an identity mapping
         bootinfo.kernel_elf_start = PhysicalAddress::new(self.data.as_ptr() as _);
         bootinfo.kernel_elf_size = self.data.len();
