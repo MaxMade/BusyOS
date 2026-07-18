@@ -9,7 +9,6 @@ pub mod generic;
 mod imp {
     pub use crate::arch::x86_64::elf::*;
     pub use crate::arch::x86_64::features::*;
-    pub use crate::arch::x86_64::paging::*;
     pub use crate::arch::x86_64::handover::*;
 }
 
