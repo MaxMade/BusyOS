@@ -14,6 +14,7 @@ use uefi::println;
 
 use busyos::kernel::bootinfo::Bootinfo;
 
+use crate::arch::generic::features::Features;
 use crate::arch::generic::handover::HandOver;
 
 /// Path to the kernel ELF on the ESP, relative to the volume root.
@@ -38,7 +39,7 @@ fn main() -> Status {
     kernel_elf.load(&mut bootinfo);
 
     // Check and active extensions
-    crate::arch::check_and_active_features();
+    arch::Features::activate();
 
     // Create page tables for hand-over
     let (mut handover, token) = arch::HandOver::prepare(&mut bootinfo, token);
