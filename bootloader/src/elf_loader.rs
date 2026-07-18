@@ -13,6 +13,8 @@ use busyos::{
 use elf::{ElfBytes, endian::AnyEndian};
 use uefi::proto::media::file::File;
 
+use crate::arch::generic::elf::ELF as _;
+
 /// Loaded Kernel *E*xecutable and *L*inkable *F*ormat
 pub struct ELF {
     data: Vec<u8>,
@@ -88,7 +90,7 @@ impl ELF {
         };
 
         // Minimal validity check
-        crate::arch::check_elf_header(&elf);
+        crate::arch::ELF::check_header(&elf);
 
         // Search for _kernel_start and _kernel_end symbol
         let (symbol_tbl, string_tbl) = match elf.symbol_table() {

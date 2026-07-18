@@ -36,9 +36,6 @@ fn main() -> Status {
     let kernel_elf = elf_loader::ELF::read(KERNEL_PATH, handle);
     kernel_elf.load(&mut bootinfo);
 
-    // Update bootinformation
-    crate::arch::update_bootinfo(&mut bootinfo);
-
     // Check and active extensions
     crate::arch::check_and_active_features();
 
