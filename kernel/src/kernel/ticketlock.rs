@@ -155,7 +155,7 @@ impl<Id: LockId> HierarchicalLock for RWTicketlock<Id> {
     }
 
     unsafe fn raw_lock_shared_nested(&self) {
-        self.state.fetch_add(1, AtomicOrdering::Release);
+        self.state.fetch_add(1, AtomicOrdering::Acquire);
     }
 
     unsafe fn raw_unlock_shared_nested(&self) {
