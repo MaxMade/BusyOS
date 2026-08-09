@@ -2,6 +2,9 @@
 //!
 //! Enforced statically:
 //! - Locks are acquired strictly top-down (variant order of the enum).
+//! - Holding a level grants access to *every* level below it: a bound of
+//!   `CanAcquire<Epilogue>` implies `CanAcquire<MemoryManagement>`, so
+//!   generic code only ever names the highest level it needs.
 //! - At most one lock per level per thread (tokens are consumed on acquire).
 //! - Release happens in exact reverse order (previous token embedded in type).
 //! - Tokens can only be released through the lock identity that minted them.
@@ -11,14 +14,20 @@
 //! - Tokens are `!Send`/`!Sync` and cannot be forged in safe code.
 
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{parse_macro_input, Data, DeriveInput};
 
 /// Derives the complete locking hierarchy infrastructure from an enum.
 ///
 /// Variants define lock levels in **descending order**: the first variant
-/// is the highest level (acquirable from `RootToken` only); each further
-/// level is acquirable from any token of a strictly higher level.
+/// is the highest level; each level is acquirable from any token of a
+/// strictly higher level, and from `RootToken`, which holds nothing and
+/// may therefore enter the hierarchy at any level.
+///
+/// The capability is downward-closed and, crucially, *stays* that way
+/// through a generic bound: a `T: CanAcquire<Epilogue>` parameter also
+/// satisfies `CanAcquire<MemoryManagement>` and `CanAcquire<Prologue>`,
+/// so a caller only names the highest level it needs.
 ///
 /// Derive this exactly **once** per module — it emits module-level items
 /// (`Token`, `RootToken`, `Lock`, ...) that would collide if generated
@@ -51,33 +60,54 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
     }
 
     // ------------------------------------------------------------------
-    // Level marker structs + LockLevel impls
+    // Downward chain: `Lower1`, `Lower2`, ... name the levels below a
+    // level, nearest first. The chain saturates at the lowest level, so
+    // entries past the bottom simply repeat it.
+    //
+    // This exists purely to make the implication in `CanAcquire` work.
+    // Rust elaborates *supertraits* only: from `T: CanAcquire<Epilogue>`
+    // in a where-clause it will never reach a different instantiation of
+    // the same trait, no matter which impls exist, because impls cannot
+    // be run backwards against an opaque type parameter. Naming the lower
+    // levels as associated types lets `CanAcquire<L>` list all of them in
+    // its own supertrait bounds, which the compiler *does* elaborate.
     // ------------------------------------------------------------------
-    let level_markers = variants.iter().map(|v| {
+    let depth = variants.len() - 1;
+    let lower_names: Vec<_> = (1..=depth).map(|k| format_ident!("Lower{}", k)).collect();
+
+    // ------------------------------------------------------------------
+    // Level marker structs + LockLevel/LowerLevels impls
+    // ------------------------------------------------------------------
+    let level_markers = variants.iter().enumerate().map(|(i, v)| {
         let doc = format!("Marker type for the `{v}` lock level.");
+        let chain = lower_names.iter().enumerate().map(|(k, name)| {
+            let below = &variants[usize::min(i + k + 1, variants.len() - 1)];
+            quote! { type #name = #below; }
+        });
         quote! {
             #[doc = #doc]
             pub struct #v;
             impl super::LockLevel for #v {}
+            impl super::LowerLevels for #v {
+                #(#chain)*
+            }
         }
     });
 
     // ------------------------------------------------------------------
     // Ordering:
-    //   - RootToken: CanAcquire<level::V0>  (top level only)
+    //   - RootToken: Reaches<level::Vj>     for every level
     //   - level::Vi: Above<level::Vj>       for all i < j
-    //   - One blanket impl: Token<I,P,K>: CanAcquire<L>
+    //   - One blanket impl: Token<I,P,K>: Reaches<L>
     //                       where I::Level: Above<L>
     //   Using Above on the concrete level marker types avoids the
     //   coherence conflict that arises from multiple blanket impls on
     //   Token<I,P,K> with different where-clauses.
     // ------------------------------------------------------------------
     let orderings = variants.iter().enumerate().flat_map(|(j, lower)| {
-        let root = (j == 0).then(|| {
-            quote! {
-                impl CanAcquire<level::#lower> for RootToken {}
-            }
-        });
+        let root = quote! {
+            impl Reaches<level::#lower> for RootToken {}
+        };
         let variants = variants.clone();
         let lower = lower.clone();
         let highers = (0..j).map(move |i| {
@@ -87,7 +117,27 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
                 impl Above<level::#lower> for level::#higher {}
             }
         });
-        root.into_iter().chain(highers)
+        core::iter::once(root).chain(highers)
+    });
+
+    // ------------------------------------------------------------------
+    // `CanAcquire<L>` bundles the raw `Reaches` capability for `L` with
+    // the one for every level below it, as supertraits. Both the trait
+    // header and the blanket impl need the identical list.
+    // ------------------------------------------------------------------
+    let lower_bounds: Vec<_> = lower_names
+        .iter()
+        .map(|name| quote! { Reaches<<Level as LowerLevels>::#name> })
+        .collect();
+    let lower_decls = lower_names.iter().enumerate().map(|(k, name)| {
+        let doc = format!(
+            "The level {} step(s) below `Self`, saturating at the lowest level.",
+            k + 1
+        );
+        quote! {
+            #[doc = #doc]
+            type #name;
+        }
     });
 
     quote! {
@@ -120,7 +170,17 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
         // ==============================================================
 
         /// Marker trait for lock level types.
-        pub trait LockLevel {}
+        pub trait LockLevel: LowerLevels {}
+
+        /// Names the levels below a level, nearest first, as associated
+        /// types (`Lower1`, `Lower2`, ...). The chain saturates at the
+        /// lowest level: entries past the bottom repeat it.
+        ///
+        /// Implementation detail of the [`CanAcquire`] implication chain,
+        /// generated for every level; not meant to be named directly.
+        pub trait LowerLevels {
+            #(#lower_decls)*
+        }
 
         /// `Higher: Above<Lower>` — a lock at `Higher` level may be held
         /// while acquiring a lock at `Lower` level.
@@ -128,6 +188,11 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
         /// Implemented on the concrete level marker types (not on `Token`),
         /// which avoids coherence conflicts when multiple higher levels can
         /// all reach the same lower level.
+        #[diagnostic::on_unimplemented(
+            message = "lock level `{Self}` is not above `{Lower}`",
+            label = "a lock at `{Lower}` may only be acquired while holding \
+                     a strictly higher level"
+        )]
         pub trait Above<Lower: LockLevel>: LockLevel {}
 
         /// A unique lock identity, tied to a hierarchy level.
@@ -138,22 +203,56 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
             type Level: LockLevel;
         }
 
-        /// `T: CanAcquire<L>` — a token of type `T` may acquire a lock
-        /// at level `L`.
+        /// `T: Reaches<L>` — the raw, single-level fact that `T`'s own
+        /// level is strictly [`Above`] `L`.
         ///
-        /// For [`Token`]: implemented via a single blanket rule using
-        /// [`Above`], so there is exactly one impl regardless of how many
-        /// levels are above `L`.
-        /// For [`RootToken`]: implemented only for the topmost level.
-        pub trait CanAcquire<Level: LockLevel> {}
+        /// For [`Token`]: a single blanket rule keyed on [`Above`], so
+        /// there is exactly one impl regardless of how many levels are
+        /// above `L`. For [`RootToken`]: one impl per level — the root
+        /// holds nothing and may therefore enter anywhere.
+        ///
+        /// Use [`CanAcquire`] in bounds; this trait carries no implication
+        /// to lower levels on its own.
+        #[diagnostic::on_unimplemented(
+            message = "`{Self}` may not acquire a lock at level `{Level}`",
+            label = "this token's own level is not strictly above `{Level}`",
+            note = "a token may only descend the hierarchy: it can acquire \
+                    levels below the one it currently holds"
+        )]
+        pub trait Reaches<Level> {}
 
-        /// Blanket rule: a token may acquire any level that its own level
+        /// Blanket rule: a token reaches any level that its own level
         /// is [`Above`].
-        impl<Lvl, I, P, K> CanAcquire<Lvl> for Token<I, P, K>
+        impl<Level, I, P, K> Reaches<Level> for Token<I, P, K>
         where
-            Lvl: LockLevel,
+            Level: LockLevel,
             I: LockId,
-            <I as LockId>::Level: Above<Lvl>,
+            <I as LockId>::Level: Above<Level>,
+        {}
+
+        /// `T: CanAcquire<L>` — a token of type `T` may acquire a lock at
+        /// level `L`, **and at every level below `L`**.
+        ///
+        /// The lower levels are supertraits, so the implication survives
+        /// into generic code: a function bounded by `CanAcquire<Epilogue>`
+        /// can hand its token to one requiring `CanAcquire<MemoryManagement>`
+        /// without restating the bound. Elaboration is what makes this
+        /// work, hence the [`LowerLevels`] chain — a plain blanket impl
+        /// would only ever apply to concrete token types.
+        #[diagnostic::on_unimplemented(
+            message = "`{Self}` may not acquire a lock at level `{Level}`",
+            label = "requires a token holding a level strictly above `{Level}`",
+            note = "locks are acquired strictly top-down; bound the token by \
+                    the highest level it must acquire, which implies all \
+                    lower ones"
+        )]
+        pub trait CanAcquire<Level: LockLevel>: Reaches<Level> #(+ #lower_bounds)* {}
+
+        /// Blanket rule: the bundle holds exactly when every part does.
+        impl<T, Level> CanAcquire<Level> for T
+        where
+            Level: LockLevel,
+            T: Reaches<Level> #(+ #lower_bounds)*,
         {}
 
         /// Marker types for each lock level, highest first.

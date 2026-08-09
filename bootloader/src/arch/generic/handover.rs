@@ -39,6 +39,8 @@ pub trait HandOver {
     ///
     /// The caller must hold the [`Epilogue`] lock level, ensuring that no
     /// further system initialization can race with the handover preparation.
+    /// This implies access to all lower levels, such as the memory
+    /// management level needed to build temporary page tables.
     fn prepare<Token>(bootinfo: &mut Bootinfo, token: Token) -> (Self, Token)
     where
         Self: Sized,
