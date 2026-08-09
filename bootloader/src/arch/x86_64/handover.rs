@@ -1,7 +1,14 @@
-use busyos::kernel::{bootinfo::Bootinfo, locking::{CanAcquire, PreviousToken, level::Epilogue}};
+use busyos::{arch::generic::paging::Paging as _, kernel::{
+    bootinfo::Bootinfo,
+    locking::{CanAcquire, PreviousToken, level::Epilogue},
+}};
 
-#[derive(Debug)]
-pub struct HandOver;
+use crate::paging::Paging;
+
+pub struct HandOver {
+    /// Temporary page tables used to jump into the higher half.
+    paging: Paging,
+}
 
 impl crate::arch::generic::handover::HandOver for HandOver {
     fn prepare<Token>(bootinfo: &mut Bootinfo, token: Token) -> (Self, Token)
@@ -14,10 +21,15 @@ impl crate::arch::generic::handover::HandOver for HandOver {
 
         // TODO(@MaxMade): Save address of UEFI's IDT
 
-        todo!()
+        let (paging, token) = crate::paging::prepare_handover(token);
+
+        (Self { paging }, token)
     }
 
     unsafe fn handover(&mut self) -> bool {
-        todo!()
+        // Activate temporary mapping
+        unsafe { self.paging.active() };
+
+        todo!();
     }
 }
