@@ -3,7 +3,7 @@
  *
  * Virtual memory layout
  * ---------------------
- *  0xFFFFFFFF80000000  kernel load address (−2 GiB, fits in a 2 GiB PML4 slot)
+ *  0xFFFF800000000000  kernel load address (−2 GiB, fits in a 2 GiB PML4 slot)
  *  .text              executable code, 4 KiB aligned
  *  .rodata            read-only data
  *  .data              mutable initialised data
@@ -14,12 +14,12 @@
 /* -- Constants ------------------------------------------------------------ */
 
 /*
- * Higher-half base: last 2 GiB of the 64-bit address space.
- * Placing the kernel here allows a single PML4 entry (index 511) and a
+ * Higher-half base: first 2 GiB of the 64-bit upper-half address space.
+ * Placing the kernel here allows a single PML4 entry (index 256) and a
  * single PDPE (1 GiB slot) to cover the entire kernel image, which makes
  * early boot page-table setup much simpler.
  */
-KERNEL_VMA_START  = 0xFFFFFFFF80000000;
+KERNEL_VMA_START  = 0xFFFF800000000000;
 
 /*
  * Physical load address.  1 MiB avoids the BIOS data area and the first

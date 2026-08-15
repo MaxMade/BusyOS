@@ -2,13 +2,16 @@ use core::ffi::c_void;
 use core::ptr;
 
 use crate::arch::Bootinfo as ArchBootinfo;
-use crate::arch::generic::paging::PhysicalAddress;
+use crate::arch::generic::paging::{PhysicalAddress, VirtualAddress};
 
 #[repr(C)]
 #[derive(Debug)]
 pub struct Bootinfo {
     /// Offset between every virtual and physical address of the kernel
     pub kernel_virt_phys_offset: usize,
+
+    /// Virtual address of the `_start` symbol.
+    pub kernel_start_symbol: VirtualAddress<c_void>,
 
     /// Physical address of the kernel ELF file.
     pub kernel_elf_start: PhysicalAddress<c_void>,
@@ -59,6 +62,7 @@ impl Default for Bootinfo {
             kernel_data_size: 0,
             kernel_bss_start: PhysicalAddress::new(ptr::null_mut()),
             kernel_bss_size: 0,
+            kernel_start_symbol: VirtualAddress::new(ptr::null_mut()),
         }
     }
 }

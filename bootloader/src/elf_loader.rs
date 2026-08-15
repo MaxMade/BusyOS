@@ -92,6 +92,9 @@ impl ELF {
         // Minimal validity check
         crate::arch::ELF::check_header(&elf);
 
+        // Save the address of `_start` (kernel entry)
+        bootinfo.kernel_start_symbol = VirtualAddress::new(elf.ehdr.e_entry as _);
+
         // Search for _kernel_start and _kernel_end symbol
         let (symbol_tbl, string_tbl) = match elf.symbol_table() {
             Ok(Some((symbol_tbl, string_tbl))) => (symbol_tbl, string_tbl),
