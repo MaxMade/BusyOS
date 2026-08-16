@@ -8,6 +8,15 @@ pub enum Level {
     Syscall,
     // Top half of interrupt handling.
     Epilogue,
+    // The scheduler's own lock, and the boundary between blocking and
+    // spinning locks.
+    //
+    // Sleeping *is* acquiring this lock, so a blocking operation is written
+    // `fn sleep<T: CanAcquire<level::Scheduler>>(token: T) -> T`. Everything
+    // strictly above may therefore sleep and is a blocking lock (Mutex); this
+    // level and everything below may not and is a spinning lock (Spinlock,
+    // Ticketlock).
+    Scheduler,
     // Memory Management, e.g. creating/removing page mappings or
     // allocating/freeing heap memory.
     MemoryManagement,

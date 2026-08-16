@@ -2,6 +2,7 @@
 pub mod panic;
 
 pub mod bootinfo;
+pub mod core_local;
 pub mod locking;
 pub mod prologue_lock;
 pub mod spinlock;

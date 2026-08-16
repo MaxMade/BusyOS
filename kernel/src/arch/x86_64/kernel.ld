@@ -132,6 +132,50 @@ SECTIONS
         _bss_end = ALIGN(4K);
     }
 
+    /* -- .percpu — core-local storage template ---------------------------- */
+
+    /*
+     * Template for a single core's block of core-local variables.
+     *
+     * Linked at a normal virtual address like every other section, so the
+     * bootloader's PT_LOAD handling needs no special case.  Variables inside
+     * are never addressed directly; they are reached as
+     *
+     *     GS base of the current core + (&VAR - _percpu_start)
+     *
+     * so only the offset within the block matters, not the absolute address.
+     *
+     * No storage is reserved here: the blocks themselves are allocated at
+     * boot, once the real core count is known, and the template is copied
+     * into each of them.  This section only describes what to copy
+     * (_percpu_start, _percpu_size) and how far apart the copies must sit
+     * (_percpu_stride).
+     *
+     * Placed last, after .bss, so that the template forms a page-aligned tail
+     * of the image: once every core has its copy the pages in
+     * [_percpu_start, _kernel_end) are dead and can be handed back to the
+     * frame allocator without leaving a hole in the middle of the kernel.
+     */
+
+    .percpu ALIGN(4K) : AT(ADDR(.percpu) - KERNEL_VMA_START + KERNEL_PHYS_BASE)
+    {
+        _percpu_start = .;
+
+        *(.percpu .percpu.*)
+
+        . = ALIGN(64);
+        _percpu_end = .;
+    }
+
+    _percpu_size = _percpu_end - _percpu_start;
+
+    /*
+     * Distance between two blocks.  Rounded up to a cache line — or to the
+     * section's own alignment when that is stricter — so that variables
+     * belonging to different cores never share a cache line.
+     */
+    _percpu_stride = ALIGN(_percpu_size, MAX(64, ALIGNOF(.percpu)));
+
     /* -- Exported layout symbols ---------------------------------------- */
 
     /*
