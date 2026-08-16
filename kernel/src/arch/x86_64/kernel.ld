@@ -170,18 +170,18 @@ SECTIONS
 
         *(.percpu .percpu.*)
 
-        . = ALIGN(64);
+        . = ALIGN(4K);
         _percpu_end = .;
     }
 
     _percpu_size = _percpu_end - _percpu_start;
 
     /*
-     * Distance between two blocks.  Rounded up to a cache line — or to the
+     * Distance between two blocks.  Rounded up to a page — or to the
      * section's own alignment when that is stricter — so that variables
      * belonging to different cores never share a cache line.
      */
-    _percpu_stride = ALIGN(_percpu_size, MAX(64, ALIGNOF(.percpu)));
+    _percpu_stride = ALIGN(_percpu_size, MAX(4K, ALIGNOF(.percpu)));
 
     /* -- Exported layout symbols ---------------------------------------- */
 

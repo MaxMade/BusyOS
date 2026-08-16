@@ -11,7 +11,7 @@ use busyos::{
     kernel::bootinfo::Bootinfo,
 };
 use elf::{ElfBytes, endian::AnyEndian};
-use uefi::proto::media::file::File;
+use uefi::proto::{media::file::File, pi::mp::MpServices};
 
 use crate::arch::generic::elf::ELF as _;
 
@@ -118,13 +118,46 @@ impl ELF {
         }
 
         // Calculate kernel size
-        let kernel_size = match _kernel_end.addr().checked_sub(_kernel_start.addr()) {
+        let mut kernel_size = match _kernel_end.addr().checked_sub(_kernel_start.addr()) {
             Some(kernel_size) => kernel_size,
             None => panic!(
                 "Invalid kernel ELF: `_kernel_start` @ {:p} & `_kernel_end` @ {:p}",
                 _kernel_start, _kernel_end
             ),
         };
+
+        // Determine number of cores
+        let handle = match uefi::boot::get_handle_for_protocol::<MpServices>() {
+            Ok(handle) => handle,
+            Err(error) => panic!("Unable to determine number of core: {}", error),
+        };
+        let mp = match uefi::boot::open_protocol_exclusive::<MpServices>(handle) {
+            Ok(mp) => mp,
+            Err(error) => panic!("Unable to determine number of core: {}", error),
+        };
+
+        let num_cpus = match mp.get_number_of_processors()  {
+            Ok(count) => count,
+            Err(error) => panic!("Unable to determine number of core: {}", error),
+        };
+
+        // Get size of a single entry for core local storage
+        let _percpu_start = get_symbol_value("_percpu_start");
+        let _percpu_size = get_symbol_value("_percpu_size");
+        let _percpu_stride = get_symbol_value("_percpu_stride");
+        if _percpu_start.addr() % REGULAR_PAGE_SIZE != 0 {
+            panic!("Unexpected value for `_percpu_start`: {:p}", _percpu_start);
+        }
+        if _percpu_stride.addr() % REGULAR_PAGE_SIZE != 0 {
+            panic!("Unexpected value for `_percpu_stride`: {:p}", _percpu_stride);
+        }
+        if _percpu_size.addr() > _percpu_stride.addr() {
+            panic!(
+                "Core-local block ({:p}) larger than its stride ({:p})",
+                _percpu_size, _percpu_stride
+            );
+        }
+        kernel_size += _percpu_stride.addr() * num_cpus.total.saturating_sub(1);
 
         // Allocate the memory
         let mut num_pages = kernel_size / uefi::boot::PAGE_SIZE;
@@ -176,6 +209,38 @@ impl ELF {
                 mem[memory_offset..memory_offset + file_size]
                     .copy_from_slice(&self.data[file_offset..file_offset + file_size]);
             }
+        }
+
+        // Copy bitwise the remaining core-local storage entries
+        //
+        // `.percpu` is the last section of the image, so the extra blocks are
+        // simply appended: block `i` starts one stride further along than
+        // block `i - 1`, and block 0 is the template that the segment loop
+        // above has just written. The space for them was added to
+        // `kernel_size` before the allocation.
+        let percpu_offset = match _percpu_start.addr().checked_sub(_kernel_start.addr()) {
+            Some(percpu_offset) => percpu_offset,
+            None => panic!(
+                "`_percpu_start` @ {:p} lies before `_kernel_start` @ {:p}",
+                _percpu_start, _kernel_start
+            ),
+        };
+        let percpu_size = _percpu_size.addr();
+        let percpu_stride = _percpu_stride.addr();
+
+        for core in 1..num_cpus.total {
+            let dst = percpu_offset + core * percpu_stride;
+
+            if dst + percpu_size > mem.len() {
+                panic!(
+                    "Core-local block {} ends at {:#x}, past the {:#x} byte allocation",
+                    core,
+                    dst + percpu_size,
+                    mem.len()
+                );
+            }
+
+            mem.copy_within(percpu_offset..percpu_offset + percpu_size, dst);
         }
 
         // Resolve relocations

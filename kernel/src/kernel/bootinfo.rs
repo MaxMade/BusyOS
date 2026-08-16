@@ -1,5 +1,4 @@
 use core::ffi::c_void;
-use core::ptr;
 use core::mem::MaybeUninit;
 
 use crate::arch::Bootinfo as ArchBootinfo;
@@ -8,6 +7,9 @@ use crate::arch::generic::paging::{PhysicalAddress, VirtualAddress};
 #[repr(C)]
 #[derive(Debug)]
 pub struct Bootinfo {
+    /// Number of available CPUs.
+    pub num_cpus: usize,
+
     /// Offset between every virtual and physical address of the kernel
     pub kernel_virt_phys_offset: usize,
 
@@ -44,6 +46,12 @@ pub struct Bootinfo {
     /// Size of the kernel `.bss` segment.
     pub kernel_bss_size: usize,
 
+    /// Physical address of the kernel `.percpu` segment.
+    pub kernel_percpu_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel `.percpu` segment.
+    pub kernel_percpu_size: usize,
+
     /// Architecture-specific boot information
     pub arch_bootinfo: ArchBootinfo,
 }
@@ -52,18 +60,21 @@ impl Default for Bootinfo {
     fn default() -> Self {
         Self {
             kernel_virt_phys_offset: 0,
-            kernel_elf_start: PhysicalAddress::new(ptr::null_mut()),
+            kernel_start_symbol: VirtualAddress::null(),
+            kernel_elf_start: PhysicalAddress::null(),
             kernel_elf_size: 0,
             arch_bootinfo: Default::default(),
-            kernel_text_start: PhysicalAddress::new(ptr::null_mut()),
+            kernel_text_start: PhysicalAddress::null(),
             kernel_text_size: 0,
-            kernel_rodata_start: PhysicalAddress::new(ptr::null_mut()),
+            kernel_rodata_start: PhysicalAddress::null(),
             kernel_rodata_size: 0,
-            kernel_data_start: PhysicalAddress::new(ptr::null_mut()),
+            kernel_data_start: PhysicalAddress::null(),
             kernel_data_size: 0,
-            kernel_bss_start: PhysicalAddress::new(ptr::null_mut()),
+            kernel_bss_start: PhysicalAddress::null(),
             kernel_bss_size: 0,
-            kernel_start_symbol: VirtualAddress::new(ptr::null_mut()),
+            kernel_percpu_start: PhysicalAddress::null(),
+            kernel_percpu_size: 0,
+            num_cpus: 0,
         }
     }
 }
