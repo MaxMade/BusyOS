@@ -6,8 +6,15 @@ use kernel_derive::{Locking, lock_id};
 #[derive(Locking)]
 pub enum Level {
     Syscall,
+    // Top half of interrupt handling.
     Epilogue,
+    // Memory Management, e.g. creating/removing page mappings or
+    // allocating/freeing heap memory.
     MemoryManagement,
+    /// Raw memory, e.g. allocating physical memory ranges for paging or
+    /// using the heap. Sits below `MemoryManagement`, which builds on it.
+    Memory,
+    // Bottom half of interrupt handling.
     Prologue,
 }
 
@@ -91,6 +98,31 @@ impl Drop for MemoryManagementLevel {
         panic!(
             "MemoryManagement level must never be left implicitly! Use MemoryManagementLevel::leave(...) instead!"
         );
+    }
+}
+
+#[lock_id(Memory)]
+pub struct MemoryLevelID;
+
+pub struct MemoryLevel;
+
+impl MemoryLevel {
+    pub fn enter(root_token: RootToken) -> (Self, Token<MemoryLevelID, RootToken, Shared>) {
+        core::mem::forget(root_token);
+
+        let token = unsafe { Token::forge() };
+        (Self, token)
+    }
+
+    pub fn leave(self, token: Token<MemoryLevelID, RootToken, Shared>) {
+        core::mem::forget(self);
+        core::mem::forget(token);
+    }
+}
+
+impl Drop for MemoryLevel {
+    fn drop(&mut self) {
+        panic!("Memory level must never be left implicitly! Use MemoryLevel::leave(...) instead!");
     }
 }
 

@@ -6,9 +6,13 @@ use core::{
 use kernel_derive::lock_id;
 
 use crate::kernel::locking::{HierarchicalLock, Lock, LockId, level};
+use crate::kernel::prologue_lock::PrologueLock;
 
 #[lock_id(MemoryManagement)]
 pub struct SpinlockMemoryManagementID;
+
+#[lock_id(Memory)]
+pub struct SpinlockMemoryID;
 
 #[lock_id(Prologue)]
 pub struct SpinlockPrologueID;
@@ -55,10 +59,16 @@ impl<Id: LockId> HierarchicalLock for Spinlock<Id> {
 
 pub type MemoryManagementSpinlock<T> = Lock<T, Spinlock<SpinlockMemoryManagementID>>;
 
-pub type PrologueSpinlock<T> = Lock<T, Spinlock<SpinlockPrologueID>>;
+pub type MemorySpinlock<T> = Lock<T, Spinlock<SpinlockMemoryID>>;
+
+/// Prologue-level spinlock. Masks interrupts for the duration of the hold.
+pub type PrologueSpinlock<T> = PrologueLock<T, Spinlock<SpinlockPrologueID>>;
 
 #[lock_id(MemoryManagement)]
 pub struct RWSpinlockMemoryManagementID;
+
+#[lock_id(Memory)]
+pub struct RWSpinlockMemoryID;
 
 #[lock_id(Prologue)]
 pub struct RWSpinlockPrologueID;
@@ -128,7 +138,11 @@ impl<Id: LockId> HierarchicalLock for RWSpinlock<Id> {
 
 pub type MemoryManagementRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockMemoryManagementID>>;
 
-pub type PrologueRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockPrologueID>>;
+pub type MemoryRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockMemoryID>>;
+
+/// Prologue-level reader-writer spinlock. Masks interrupts for the duration
+/// of the hold.
+pub type PrologueRWSpinlock<T> = PrologueLock<T, RWSpinlock<RWSpinlockPrologueID>>;
 
 #[cfg(test)]
 mod test {
@@ -153,13 +167,13 @@ mod test {
 
         let epilogue = MemoryManagementSpinlock::new(Spinlock::new(), 0);
 
-        let prologue = PrologueSpinlock::new(Spinlock::new(), 0);
+        let memory = MemorySpinlock::new(Spinlock::new(), 0);
 
         let (epilogue_guard, token) = epilogue.acquire(token);
 
-        let (prologue_guard, token) = prologue.acquire(token);
+        let (memory_guard, token) = memory.acquire(token);
 
-        let token = prologue_guard.release(token);
+        let token = memory_guard.release(token);
 
         let token = epilogue_guard.release(token);
 
@@ -174,15 +188,15 @@ mod test {
 
         let epilogue = MemoryManagementRWSpinlock::new(RWSpinlock::new(), 0);
 
-        let prologue = PrologueRWSpinlock::new(RWSpinlock::new(), 0);
+        let memory = MemoryRWSpinlock::new(RWSpinlock::new(), 0);
 
         let (epilogue_guard_0, token) = epilogue.acquire_shared(token);
 
         let (epilogue_guard_1, token) = epilogue.acquire_shared_nested(token);
 
-        let (prologue_guard, token) = prologue.acquire(token);
+        let (memory_guard, token) = memory.acquire(token);
 
-        let token = prologue_guard.release(token);
+        let token = memory_guard.release(token);
 
         let token = epilogue_guard_1.release(token);
 
@@ -191,14 +205,14 @@ mod test {
         syscall_level.leave(token);
     }
 
-    fn do_prologue_work<From>(token: From) -> From
+    fn do_memory_work<From>(token: From) -> From
     where
-        From: CanAcquire<level::Prologue> + PreviousToken,
+        From: CanAcquire<level::Memory> + PreviousToken,
     {
-        let prologue = PrologueSpinlock::new(Spinlock::new(), 0);
-        let (prologue_guard, token) = prologue.acquire(token);
+        let memory = MemorySpinlock::new(Spinlock::new(), 0);
+        let (memory_guard, token) = memory.acquire(token);
 
-        prologue_guard.release(token)
+        memory_guard.release(token)
     }
 
     #[test]
@@ -211,7 +225,7 @@ mod test {
 
         let (epilogue_guard, token) = epilogue.acquire(token);
 
-        let token = do_prologue_work(token);
+        let token = do_memory_work(token);
 
         let token = epilogue_guard.release(token);
 
@@ -228,7 +242,7 @@ mod test {
 
         let (epilogue_guard, token) = epilogue.acquire_shared(token);
 
-        let token = do_prologue_work(token);
+        let token = do_memory_work(token);
 
         let token = epilogue_guard.release(token);
 
@@ -334,3 +348,4 @@ mod test {
         assert!(*counter.get_mut() == NUM_EXCLUSIVE * ITERATIONS);
     }
 }
+

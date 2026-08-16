@@ -6,9 +6,13 @@ use core::{
 use kernel_derive::lock_id;
 
 use crate::kernel::locking::{HierarchicalLock, Lock, LockId, level};
+use crate::kernel::prologue_lock::PrologueLock;
 
 #[lock_id(MemoryManagement)]
 pub struct TicketlockMemoryManagementID;
+
+#[lock_id(Memory)]
+pub struct TicketlockMemoryID;
 
 #[lock_id(Prologue)]
 pub struct TicketlockPrologueID;
@@ -58,10 +62,16 @@ impl<Id: LockId> HierarchicalLock for Ticketlock<Id> {
 
 pub type MemoryManagementTicketlock<T> = Lock<T, Ticketlock<TicketlockMemoryManagementID>>;
 
-pub type PrologueTicketlock<T> = Lock<T, Ticketlock<TicketlockPrologueID>>;
+pub type MemoryTicketlock<T> = Lock<T, Ticketlock<TicketlockMemoryID>>;
+
+/// Prologue-level ticketlock. Masks interrupts for the duration of the hold.
+pub type PrologueTicketlock<T> = PrologueLock<T, Ticketlock<TicketlockPrologueID>>;
 
 #[lock_id(MemoryManagement)]
 pub struct RWTicketlockMemoryManagementID;
+
+#[lock_id(Memory)]
+pub struct RWTicketlockMemoryID;
 
 #[lock_id(Prologue)]
 pub struct RWTicketlockPrologueID;
@@ -165,7 +175,11 @@ impl<Id: LockId> HierarchicalLock for RWTicketlock<Id> {
 
 pub type MemoryManagementRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockMemoryManagementID>>;
 
-pub type PrologueRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockPrologueID>>;
+pub type MemoryRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockMemoryID>>;
+
+/// Prologue-level reader-writer ticketlock. Masks interrupts for the duration
+/// of the hold.
+pub type PrologueRWTicketlock<T> = PrologueLock<T, RWTicketlock<RWTicketlockPrologueID>>;
 
 #[cfg(test)]
 mod test {
@@ -190,13 +204,13 @@ mod test {
 
         let epilogue = MemoryManagementTicketlock::new(Ticketlock::new(), 0);
 
-        let prologue = PrologueTicketlock::new(Ticketlock::new(), 0);
+        let memory = MemoryTicketlock::new(Ticketlock::new(), 0);
 
         let (epilogue_guard, token) = epilogue.acquire(token);
 
-        let (prologue_guard, token) = prologue.acquire(token);
+        let (memory_guard, token) = memory.acquire(token);
 
-        let token = prologue_guard.release(token);
+        let token = memory_guard.release(token);
 
         let token = epilogue_guard.release(token);
 
@@ -211,15 +225,15 @@ mod test {
 
         let epilogue = MemoryManagementRWTicketlock::new(RWTicketlock::new(), 0);
 
-        let prologue = PrologueRWTicketlock::new(RWTicketlock::new(), 0);
+        let memory = MemoryRWTicketlock::new(RWTicketlock::new(), 0);
 
         let (epilogue_guard_0, token) = epilogue.acquire_shared(token);
 
         let (epilogue_guard_1, token) = epilogue.acquire_shared_nested(token);
 
-        let (prologue_guard, token) = prologue.acquire(token);
+        let (memory_guard, token) = memory.acquire(token);
 
-        let token = prologue_guard.release(token);
+        let token = memory_guard.release(token);
 
         let token = epilogue_guard_1.release(token);
 
@@ -228,14 +242,14 @@ mod test {
         syscall_level.leave(token);
     }
 
-    fn do_prologue_work<From>(token: From) -> From
+    fn do_memory_work<From>(token: From) -> From
     where
-        From: CanAcquire<level::Prologue> + PreviousToken,
+        From: CanAcquire<level::Memory> + PreviousToken,
     {
-        let prologue = PrologueTicketlock::new(Ticketlock::new(), 0);
-        let (prologue_guard, token) = prologue.acquire(token);
+        let memory = MemoryTicketlock::new(Ticketlock::new(), 0);
+        let (memory_guard, token) = memory.acquire(token);
 
-        prologue_guard.release(token)
+        memory_guard.release(token)
     }
 
     #[test]
@@ -248,7 +262,7 @@ mod test {
 
         let (epilogue_guard, token) = epilogue.acquire(token);
 
-        let token = do_prologue_work(token);
+        let token = do_memory_work(token);
 
         let token = epilogue_guard.release(token);
 
@@ -265,7 +279,7 @@ mod test {
 
         let (epilogue_guard, token) = epilogue.acquire_shared(token);
 
-        let token = do_prologue_work(token);
+        let token = do_memory_work(token);
 
         let token = epilogue_guard.release(token);
 
