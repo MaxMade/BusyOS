@@ -1,5 +1,6 @@
 use core::ffi::c_void;
 use core::ptr;
+use core::mem::MaybeUninit;
 
 use crate::arch::Bootinfo as ArchBootinfo;
 use crate::arch::generic::paging::{PhysicalAddress, VirtualAddress};
@@ -66,6 +67,9 @@ impl Default for Bootinfo {
         }
     }
 }
+
+#[unsafe(no_mangle)]
+pub static mut BOOTINFO: MaybeUninit<Bootinfo> = MaybeUninit::zeroed();
 
 /// Gets address of [`ArchBootinfo`] for [`Bootinfo`].
 #[unsafe(no_mangle)]

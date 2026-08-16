@@ -12,8 +12,6 @@ use busyos::kernel::locking::SyscallLevel;
 use uefi::prelude::*;
 use uefi::println;
 
-use busyos::kernel::bootinfo::Bootinfo;
-
 use crate::arch::generic::features::Features;
 use crate::arch::generic::handover::HandOver;
 
@@ -33,16 +31,15 @@ fn main() -> Status {
     let (syscall_level, token) = SyscallLevel::enter(root_token);
 
     // Try to load BUSYOS kernel ELF
-    let mut bootinfo = Bootinfo::default();
     let handle = uefi::boot::image_handle();
     let kernel_elf = elf_loader::ELF::read(KERNEL_PATH, handle);
-    kernel_elf.load(&mut bootinfo);
+    let bootinfo = kernel_elf.load();
 
     // Check and active extensions
     arch::Features::activate();
 
     // Create page tables for hand-over
-    let (mut handover, token) = arch::HandOver::prepare(&mut bootinfo, token);
+    let (mut handover, token) = arch::HandOver::prepare(bootinfo, token);
 
     // Begin handover
     println!("Beginning handover to BUSYOS Kernel...");

@@ -82,7 +82,7 @@ impl ELF {
         Self { data }
     }
 
-    pub fn load(&self, bootinfo: &mut Bootinfo) {
+    pub fn load(&self) -> &'static mut Bootinfo {
         // Minimal ELF parsing
         let elf = match ElfBytes::<AnyEndian>::minimal_parse(&self.data) {
             Ok(elf) => elf,
@@ -91,9 +91,6 @@ impl ELF {
 
         // Minimal validity check
         crate::arch::ELF::check_header(&elf);
-
-        // Save the address of `_start` (kernel entry)
-        bootinfo.kernel_start_symbol = VirtualAddress::new(elf.ehdr.e_entry as _);
 
         // Search for _kernel_start and _kernel_end symbol
         let (symbol_tbl, string_tbl) = match elf.symbol_table() {
@@ -199,11 +196,21 @@ impl ELF {
                 }
             }
         }
+        let kernel_virt_phys_offset = _kernel_start.addr() - mem.as_ptr().addr();
+        let bootinfo = unsafe {
+            let ptr: VirtualAddress<Bootinfo> = get_symbol_value("BOOTINFO")
+                .byte_sub(kernel_virt_phys_offset)
+                .cast();
+            ptr.as_ptr().as_mut_unchecked()
+        };
+
+        // Save the address of `_start` (kernel entry)
+        bootinfo.kernel_start_symbol = VirtualAddress::new(elf.ehdr.e_entry as _);
 
         // Update Bootinfo relying on UEFI running an identity mapping
         bootinfo.kernel_elf_start = PhysicalAddress::new(self.data.as_ptr() as _);
         bootinfo.kernel_elf_size = self.data.len();
-        bootinfo.kernel_virt_phys_offset = _kernel_start.addr() - mem.as_ptr().addr();
+        bootinfo.kernel_virt_phys_offset = kernel_virt_phys_offset;
 
         // Update bootinfo based on ELF file
         let _text_start = get_symbol_value("_text_start");
@@ -257,5 +264,7 @@ impl ELF {
         );
         bootinfo.kernel_bss_start = _bss_start;
         bootinfo.kernel_bss_size = bss_size;
+
+        bootinfo
     }
 }
