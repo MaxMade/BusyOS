@@ -9,8 +9,11 @@
 //! ```
 //!
 //! so only its offset within the block matters, never its link-time address.
-//! At boot the template is copied once per core into the area the linker
-//! script reserves in `.bss`, and each core's `GS` is pointed at its copy.
+//! The linker script reserves no storage: it only exports what to copy
+//! (`_percpu_start`, `_percpu_size`) and how far apart the copies must sit
+//! (`_percpu_stride`). At boot, once the real core count is known, the blocks
+//! are allocated, the template is copied into each of them, and every core's
+//! `GS` is pointed at its own copy.
 //!
 //! The variable that carries a declaration's name is therefore only the
 //! template. It must never be read as a Rust value — [`PerCPU`] keeps its

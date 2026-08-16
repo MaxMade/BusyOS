@@ -8,6 +8,7 @@
  *  .rodata            read-only data
  *  .data              mutable initialised data
  *  .bss               zero-initialised data (no space in the ELF file)
+ *  .percpu            core-local storage template (see below)
  *  _kernel_end        first byte after the kernel image
  */
 
@@ -22,11 +23,17 @@
 KERNEL_VMA_START  = 0xFFFF800000000000;
 
 /*
- * Physical load address.  1 MiB avoids the BIOS data area and the first
- * 640 KiB of conventional memory.  Must match whatever your bootloader
- * actually loads the kernel at.
+ * Physical load address.  The bootloader pins the kernel image to 1 GiB
+ * (`AllocateType::Address`), and the temporary hand-over mapping maps
+ * physical 1 GiB onto KERNEL_VMA_START, so that a section's link address is
+ * also the address it runs at once the higher half is active.
+ *
+ * This constant only feeds the AT() clauses, i.e. the `p_paddr` field of the
+ * program headers; the loader places segments by `p_vaddr`, so it is
+ * informational.  Keep it equal to the bootloader's allocation address so
+ * that `p_paddr` and debuggers agree with reality.
  */
-KERNEL_PHYS_BASE = 0x0000000000100000;
+KERNEL_PHYS_BASE = 0x0000000040000000;
 
 /* -- Entry point ---------------------------------------------------------- */
 

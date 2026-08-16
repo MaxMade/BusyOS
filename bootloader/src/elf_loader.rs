@@ -132,7 +132,7 @@ impl ELF {
             num_pages += 1;
         }
         let mem = match uefi::boot::allocate_pages(
-            uefi::boot::AllocateType::AnyPages,
+            uefi::boot::AllocateType::Address(1024 * 1024 * 1024),
             uefi::boot::MemoryType::LOADER_DATA,
             num_pages,
         ) {

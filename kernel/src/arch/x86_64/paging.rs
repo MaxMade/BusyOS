@@ -1180,11 +1180,16 @@ impl<PFA: PageFrameAllocator> PageTables<PFA> {
     /// Creates temporary kernel page tables for jumping to upper half of
     /// address space.
     ///
-    /// Maps the first 512 GiB of physical memory (`0x0`..`0x80_0000_0000`)
-    /// to the higher-half base at `0xFFFF_8000_0000_0000`, using 1 GiB
-    /// gigantic pages. Intended only as a trampoline for the jump to the
-    /// higher half; tear down with [`destroy`] once the real kernel mapping
-    /// is active.
+    /// Identity-maps the first 512 GiB of physical memory, and maps the 511
+    /// GiB starting at 1 GiB (`0x4000_0000`..`0x80_0000_0000`) to the
+    /// higher-half base at `0xFFFF_8000_0000_0000`, using 1 GiB gigantic
+    /// pages throughout.
+    ///
+    /// The higher-half window starts at 1 GiB because the bootloader pins the
+    /// kernel image there, so `KERNEL_VMA_START` resolves to the image's
+    /// physical location and a section's link address is also the address it
+    /// runs at. Intended only as a trampoline for the jump to the higher
+    /// half.
     ///
     /// # Safety
     ///
@@ -1208,8 +1213,6 @@ impl<PFA: PageFrameAllocator> PageTables<PFA> {
             let step = GIGANTIC_PAGE_SIZE as u64;
             let phys_addr = PhysicalAddress::new((i * step) as *mut c_void);
             let virt_addr_lower = VirtualAddress::new((i * step) as *mut c_void);
-            let virt_addr_upper =
-                VirtualAddress::new((0xffff_8000_0000_0000u64 + i * step) as *mut c_void);
 
             token = match unsafe {
                 page_tables.map(
@@ -1230,6 +1233,13 @@ impl<PFA: PageFrameAllocator> PageTables<PFA> {
                     return Err((error, token));
                 }
             };
+        }
+
+        for i in 0..ENTRIES_PER_TABLE as u64 - 1 {
+            let step = GIGANTIC_PAGE_SIZE as u64;
+            let phys_addr = PhysicalAddress::new((1024 * 1024 * 1024 + i * step) as *mut c_void);
+            let virt_addr_upper =
+                VirtualAddress::new((0xffff_8000_0000_0000u64 + i * step) as *mut c_void);
 
             token = match unsafe {
                 page_tables.map(
