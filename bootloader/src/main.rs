@@ -55,7 +55,8 @@ fn main() -> Status {
     syscall_level.leave(token);
 
     // Perform handover
-    let poweroff = unsafe { handover.handover() };
+    // TODO(@MaxMade): Currently only the boot processor is started...
+    let poweroff = unsafe { handover.handover(0) };
 
     // Perform shutdown
     if poweroff {

@@ -1,6 +1,7 @@
-use core::ffi::c_void;
+use core::ffi::{c_void};
 
 use busyos::{
+    arch::CPU,
     arch::generic::paging::{Paging as _, VirtualAddress},
     kernel::{
         bootinfo::Bootinfo,
@@ -34,6 +35,9 @@ impl crate::arch::generic::handover::HandOver for HandOver {
 
         // TODO(@MaxMade): Save address of UEFI's IDT
 
+        // Save value of UEFI's `gs` register
+        bootinfo.arch_bootinfo.gs = unsafe { CPU::gs_base() };
+
         // Save the address of `_start` symbol
         let entry = bootinfo.kernel_start_symbol;
 
@@ -43,14 +47,17 @@ impl crate::arch::generic::handover::HandOver for HandOver {
         (Self { paging, entry }, token)
     }
 
-    unsafe fn handover(&mut self) -> bool {
+    unsafe fn handover(&mut self, cpu_id: usize) -> bool {
         // Activate temporary mapping
         unsafe { self.paging.active() };
 
         // Jump to BUSYOS kernel
         let ptr = self.entry.as_ptr() as *const c_void;
-        let entry: extern "C" fn() -> i32 = unsafe { core::mem::transmute(ptr) };
-        let success = entry() == 0;
+
+        let entry: extern "C" fn(usize) -> i32 = unsafe { core::mem::transmute(ptr) };
+
+        // TODO(@MaxMade): Currently only one CPU supported...
+        let success = entry(cpu_id) == 0;
 
         success
     }

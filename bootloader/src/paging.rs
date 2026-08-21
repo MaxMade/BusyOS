@@ -2,7 +2,6 @@ use core::ffi::c_void;
 
 use busyos::{
     arch::{
-        PageTables,
         generic::paging::{Error as PagingError, PageFrameAllocator, PageSize, PhysicalAddress},
     },
     kernel::locking::{CanAcquire, PreviousToken, level::MemoryManagement},
@@ -51,7 +50,7 @@ impl PageFrameAllocator for UEFIPageFrameAllocator {
     }
 }
 
-pub type Paging = PageTables<UEFIPageFrameAllocator>;
+pub type Paging = busyos::arch::Paging<UEFIPageFrameAllocator>;
 
 pub fn prepare_handover<Token>(token: Token) -> (Paging, Token)
 where

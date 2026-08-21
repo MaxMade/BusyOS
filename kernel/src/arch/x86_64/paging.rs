@@ -6,8 +6,8 @@ use bitfield_struct::bitfield;
 
 use crate::{
     arch::generic::paging::{
-        AccessRights, Error as PagingError, PageFrameAllocator, PageSize, Paging, PhysicalAddress,
-        PrivilegeLevel, VirtualAddress,
+        AccessRights, Error as PagingError, PageFrameAllocator, PageSize, Paging as _,
+        PhysicalAddress, PrivilegeLevel, VirtualAddress,
     },
     kernel::{
         bootinfo::Bootinfo,
@@ -1166,7 +1166,7 @@ impl PageTable for PT {
 /// `cr3` is taken to mean that no root table has been allocated yet. The
 /// frame allocator must therefore never return physical frame 0.
 #[derive(Debug)]
-pub struct PageTables<PFA: PageFrameAllocator> {
+pub struct Paging<PFA: PageFrameAllocator> {
     /// The `cr3` register value describing the root (PML4) of this hierarchy.
     cr3: CR3,
     /// Binds the frame allocator type without storing a value.
@@ -1176,7 +1176,7 @@ pub struct PageTables<PFA: PageFrameAllocator> {
     page_table_shift: usize,
 }
 
-impl<PFA: PageFrameAllocator> PageTables<PFA> {
+impl<PFA: PageFrameAllocator> Paging<PFA> {
     /// Creates temporary kernel page tables for jumping to upper half of
     /// address space.
     ///
@@ -1203,7 +1203,7 @@ impl<PFA: PageFrameAllocator> PageTables<PFA> {
     {
         let mut token = token;
 
-        let mut page_tables = PageTables {
+        let mut page_tables = Paging {
             cr3: CR3::new(),
             phantom: PhantomData,
             page_table_shift: 0x0,
@@ -1536,7 +1536,7 @@ impl<PFA: PageFrameAllocator> PageTables<PFA> {
     }
 }
 
-impl<PFA: PageFrameAllocator> Paging<PFA> for PageTables<PFA> {
+impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Paging<PFA> {
     fn page_size(page_size: PageSize) -> Option<usize> {
         match page_size {
             PageSize::Regular => Some(REGULAR_PAGE_SIZE),
@@ -2337,9 +2337,15 @@ impl<PFA: PageFrameAllocator> Paging<PFA> for PageTables<PFA> {
         // stack. See [`CR3::write`] for the full contract.
         unsafe { self.cr3.write() };
     }
+
+    const REGULAR_PAGE_SIZE: usize = REGULAR_PAGE_SIZE;
+
+    const HUGE_PAGE_SIZE: Option<usize> = Some(HUGE_PAGE_SIZE);
+
+    const GIGANTIC_PAGE_SIZE: Option<usize> = Some(GIGANTIC_PAGE_SIZE);
 }
 
-impl<PFA: PageFrameAllocator> Drop for PageTables<PFA> {
+impl<PFA: PageFrameAllocator> Drop for Paging<PFA> {
     fn drop(&mut self) {
         // PageTables must be explicitly destroyed via `destroy()` to ensure
         // all page table frames are freed. Automatic dropping is a bug.
@@ -2508,7 +2514,7 @@ mod test {
         let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
 
         // Map 4k page
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let src_virt_addr = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
         let dst_phys_addr = TestPageFrameAllocator::virt_to_phys(src_virt_addr);
 
@@ -2586,7 +2592,7 @@ mod test {
         let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
 
         // Map 2M page
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let src_virt_addr = TestPageFrameAllocator::next_virtual_addr(PageSize::Huge);
         let dst_phys_addr = TestPageFrameAllocator::virt_to_phys(src_virt_addr);
 
@@ -2665,7 +2671,7 @@ mod test {
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
         let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         let src_virt_addr = TestPageFrameAllocator::next_virtual_addr(PageSize::Gigantic);
         let dst_phys_addr = TestPageFrameAllocator::virt_to_phys(src_virt_addr);
@@ -2713,7 +2719,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let addr = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
 
         match paging.resolve(addr) {
@@ -2732,7 +2738,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         // Map one page so the PML4 is populated.
         let mapped_virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
@@ -2773,7 +2779,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
         let phys = TestPageFrameAllocator::virt_to_phys(virt);
 
@@ -2817,7 +2823,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Huge);
         let phys = TestPageFrameAllocator::virt_to_phys(virt);
 
@@ -2859,7 +2865,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Gigantic);
         let phys = TestPageFrameAllocator::virt_to_phys(virt);
 
@@ -2901,7 +2907,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         // Map one page so there is a PML4, but try to unmap a different address.
         let virt_a = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
@@ -2938,7 +2944,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         // Map a 4 KiB page; this allocates PML4 → PDP → PD → PT.
         let virt_4k = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
@@ -2986,7 +2992,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         let virt_2m = TestPageFrameAllocator::next_virtual_addr(PageSize::Huge);
         let phys_2m = TestPageFrameAllocator::virt_to_phys(virt_2m);
@@ -3032,7 +3038,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
         let phys_a = TestPageFrameAllocator::virt_to_phys(virt);
@@ -3098,7 +3104,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Huge);
         let phys_a = TestPageFrameAllocator::virt_to_phys(virt);
@@ -3149,7 +3155,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
         let phys = TestPageFrameAllocator::virt_to_phys(virt);
 
@@ -3188,7 +3194,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
         let phys = TestPageFrameAllocator::virt_to_phys(virt);
 
@@ -3227,7 +3233,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let mut token = token;
 
         const N: usize = 8;
@@ -3306,7 +3312,7 @@ mod test {
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
         let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         let virt_1g = TestPageFrameAllocator::next_virtual_addr(PageSize::Gigantic);
         let phys_1g = TestPageFrameAllocator::virt_to_phys(virt_1g);
@@ -3364,7 +3370,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
         let phys = TestPageFrameAllocator::virt_to_phys(virt);
 
@@ -3406,7 +3412,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let mut token = token;
 
         const N: usize = 4;
@@ -3458,7 +3464,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
         let phys = TestPageFrameAllocator::virt_to_phys(virt);
 
@@ -3491,7 +3497,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         let token = match unsafe {
             paging.map(
@@ -3524,7 +3530,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let mut paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         let token = match unsafe {
             paging.unmap(
@@ -3553,7 +3559,7 @@ mod test {
         let root_token = unsafe { RootToken::forge() };
         let (syscall_level, token) = SyscallLevel::enter(root_token);
 
-        let paging: PageTables<TestPageFrameAllocator> = PageTables::new(VIRT_PHYS_SHIFT);
+        let paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
         match paging.resolve(VirtualAddress::<usize>::new(0x01007ffffffff000usize as _)) {
             Err(PagingError::InvalidAddress) => { /* Expected behaviour */ }

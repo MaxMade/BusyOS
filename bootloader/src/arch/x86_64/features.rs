@@ -2,6 +2,8 @@
 
 use busyos::arch::x86_64::cpuid::CPUID;
 use busyos::arch::x86_64::cpuid::ExtendedFunction;
+use busyos::arch::x86_64::cpuid::StructuredExtendedFeature;
+use busyos::arch::x86_64::cr4::CR4;
 use busyos::arch::x86_64::msr::EFER;
 use busyos::arch::x86_64::msr::MSR;
 
@@ -19,6 +21,8 @@ impl crate::arch::generic::features::Features for Features {
     /// - `nx`: support for `non-executable` pages.
     /// - `pdpe1gb`: support for `1 GiB` pages at `pdp` (page directory pointer table)
     /// level.
+    /// - `fsgsbase`: support for the `RDFSBASE`/`RDGSBASE`/`WRFSBASE`/`WRGSBASE`
+    /// instructions.
     fn activate() {
 
         // Check if `syscall`/`sysret` instructions are available
@@ -47,5 +51,19 @@ impl crate::arch::generic::features::Features for Features {
         if !extended_function.edx.pdpe1gb() {
             panic!("Required feature `pdpe1gb` is not available");
         }
+
+        // Check if `RDGSBASE`/`WRGSBASE` instructions are available
+        let structured_extended_feature = unsafe { StructuredExtendedFeature::read() };
+        if !structured_extended_feature.ebx.fsgsbase() {
+            panic!("Required feature `fsgsbase` is not available");
+        }
+
+        // Enable `RDGSBASE`/`WRGSBASE` instructions
+        //
+        // `cr4` is not reloaded during the hand-over, so the kernel's
+        // bootstrap stub can rely on this bit being set.
+        let mut cr4 = CR4::read();
+        cr4.set_fsgsbase(true);
+        unsafe { cr4.write() };
     }
 }

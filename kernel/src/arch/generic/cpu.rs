@@ -22,6 +22,10 @@ where
 }
 
 pub trait CPU {
+    const STACK_ALIGNMENT: usize;
+
+    const KERNEL_STACK_SIZE: usize;
+
     fn disable_interrupts<Token>(token: Token) -> InterruptState<Token>
     where
         Token: PreviousToken,

@@ -151,6 +151,8 @@ SECTIONS
      *     GS base of the current core + (&VAR - _percpu_start)
      *
      * so only the offset within the block matters, not the absolute address.
+     * The first eight bytes of a block are reserved for its own base address
+     * (see below) and hold no variable.
      *
      * No storage is reserved here: the blocks themselves are allocated at
      * boot, once the real core count is known, and the template is copied
@@ -167,6 +169,18 @@ SECTIONS
     .percpu ALIGN(4K) : AT(ADDR(.percpu) - KERNEL_VMA_START + KERNEL_PHYS_BASE)
     {
         _percpu_start = .;
+
+        /*
+         * Offset 0 of a block holds that block's own base address, so that a
+         * core-local access can resolve the current core's block with a plain
+         * `gs:0` load instead of an `RDGSBASE`.
+         *
+         * The slot is reserved here, rather than declared as a core-local
+         * variable, because nothing else guarantees that a given variable ends
+         * up at offset 0.  The template carries a zero; the bootstrap stub
+         * fills in the address of the block belonging to the core it runs on.
+         */
+        QUAD(0);
 
         *(.percpu .percpu.*)
 

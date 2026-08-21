@@ -80,13 +80,4 @@ impl Default for Bootinfo {
 }
 
 #[unsafe(no_mangle)]
-pub static mut BOOTINFO: MaybeUninit<Bootinfo> = MaybeUninit::zeroed();
-
-/// Gets address of [`ArchBootinfo`] for [`Bootinfo`].
-#[unsafe(no_mangle)]
-pub extern "C" fn __kernel_bootinfo_get_arch_bootinfo(
-    bootinfo: *mut Bootinfo,
-) -> *mut ArchBootinfo {
-    let bootinfo = unsafe { bootinfo.as_mut().unwrap() };
-    core::ptr::addr_of_mut!(bootinfo.arch_bootinfo)
-}
+pub static BOOTINFO: MaybeUninit<Bootinfo> = MaybeUninit::zeroed();

@@ -52,4 +52,57 @@ impl crate::arch::generic::cpu::CPU for CPU {
             );
         }
     }
+
+    /// Required minimum stack alignment.
+    const STACK_ALIGNMENT: usize = 16;
+
+    /// Kernel stack size.
+    const KERNEL_STACK_SIZE: usize = 16 * 1024;
+}
+
+impl CPU {
+    /// Reads the current `GS` base address using `RDGSBASE`.
+    ///
+    /// # Safety
+    ///
+    /// `RDGSBASE` raises `#UD` unless `CR4.FSGSBASE` is set, which in turn
+    /// requires the processor to support
+    /// [`fsgsbase`](crate::arch::x86_64::cpuid::StructuredExtendedFeatureEBX::fsgsbase).
+    #[inline]
+    pub unsafe fn gs_base() -> usize {
+        let base: usize;
+
+        unsafe {
+            core::arch::asm!(
+                "rdgsbase {}",
+                out(reg) base,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+
+        base
+    }
+
+    /// Sets the `GS` base address to `base` using `WRGSBASE`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`gs_base`](CPU::gs_base), `WRGSBASE` requires `CR4.FSGSBASE`
+    /// to be set.
+    ///
+    /// Additionally, `GS` is the anchor of this core's core-local storage: a
+    /// base that does not point at this core's block makes every subsequent
+    /// [`PerCPU`](crate::kernel::core_local::PerCPU) access read or write
+    /// unrelated memory. `base` must be canonical, otherwise the write
+    /// raises `#GP`.
+    #[inline]
+    pub unsafe fn set_gs_base(base: usize) {
+        unsafe {
+            core::arch::asm!(
+                "wrgsbase {}",
+                in(reg) base,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
 }

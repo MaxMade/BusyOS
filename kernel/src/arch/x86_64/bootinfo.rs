@@ -17,6 +17,9 @@ pub struct Bootinfo {
 
     /// Physical address of x86_64's descriptor of the IDT used by UEFI.
     pub uefi_idt: PhysicalAddress<c_void>, // TODO(@MaxMade): replace by actual IDT type
+
+    /// Base address of x86_64's `gs` segment used by UEFI.
+    pub gs: usize,
 }
 
 impl Default for Bootinfo {
@@ -25,27 +28,7 @@ impl Default for Bootinfo {
             uefi_cr3: Default::default(),
             uefi_gdt: PhysicalAddress::new(ptr::null_mut()),
             uefi_idt: PhysicalAddress::new(ptr::null_mut()),
+            gs: 0,
         }
     }
-}
-
-/// Stores `cr3` register in [`Bootinfo`].
-#[unsafe(no_mangle)]
-pub extern "C" fn __arch_x86_64_bootinfo_store_cr3(bootinfo: *mut Bootinfo, cr3: u64) {
-    let bootinfo = unsafe { bootinfo.as_mut().unwrap() };
-    bootinfo.uefi_cr3 = CR3::try_from(cr3).unwrap();
-}
-
-/// Stores address of `gdt` (*G*lobal *D*escriptor *T*able) descriptor in [`Bootinfo`].
-#[unsafe(no_mangle)]
-pub extern "C" fn __arch_x86_64_bootinfo_store_gdt(bootinfo: *mut Bootinfo, gdt: u64) {
-    let bootinfo = unsafe { bootinfo.as_mut().unwrap() };
-    bootinfo.uefi_gdt = PhysicalAddress::new(gdt as _);
-}
-
-/// Stores address of `idt` (*I*nterrupt *D*escriptor *T*able)  descriptor in [`Bootinfo`].
-#[unsafe(no_mangle)]
-pub extern "C" fn __arch_x86_64_bootinfo_store_idt(bootinfo: *mut Bootinfo, idt: u64) {
-    let bootinfo = unsafe { bootinfo.as_mut().unwrap() };
-    bootinfo.uefi_idt = PhysicalAddress::new(idt as _);
 }

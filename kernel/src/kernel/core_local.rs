@@ -13,7 +13,8 @@
 //! (`_percpu_start`, `_percpu_size`) and how far apart the copies must sit
 //! (`_percpu_stride`). At boot, once the real core count is known, the blocks
 //! are allocated, the template is copied into each of them, and every core's
-//! `GS` is pointed at its own copy.
+//! `GS` is pointed at its own copy — see [`init_block_base`], which fills in
+//! the base address a block is reached through.
 //!
 //! The variable that carries a declaration's name is therefore only the
 //! template. It must never be read as a Rust value — [`PerCPU`] keeps its
@@ -21,6 +22,7 @@
 //! the address calculation in [`PerCPU::with`] and friends.
 
 use core::cell::RefCell;
+use core::ffi::c_void;
 
 use crate::arch::CPU;
 use crate::arch::generic::cpu::{CPU as _, InterruptFlag};
@@ -29,6 +31,60 @@ use crate::kernel::locking::PreviousToken;
 unsafe extern "C" {
     /// First byte of the `.percpu` template, defined by the linker script.
     static _percpu_start: u8;
+
+    /// Distance between two core-local blocks, defined by the linker script.
+    ///
+    /// An absolute symbol: the stride is its *address*, there is nothing to
+    /// read at it.
+    static _percpu_stride: u8;
+}
+
+/// Distance between two core-local blocks.
+#[inline]
+fn stride() -> usize {
+    (&raw const _percpu_stride) as usize
+}
+
+/// Base address of `cpu_id`'s core-local block.
+///
+/// The blocks sit one `_percpu_stride` apart, starting at the template
+/// itself, so core 0 runs on the template and core `n` on the `n`-th copy the
+/// bootloader has made.
+///
+/// `cpu_id` is not validated — the core count is not known here, and an id
+/// beyond it simply yields an address past the last block.
+#[inline]
+pub fn block_base(cpu_id: usize) -> *const c_void {
+    let addr = (&raw const _percpu_start) as usize + cpu_id * stride();
+    addr as _
+}
+
+/// Publishes a block's own base address in its first quadword and returns
+/// that address.
+///
+/// This is the one write that makes a block usable: [`PerCPU`] resolves every
+/// access as `gs:0 + offset`, so the slot the linker script reserves at offset
+/// 0 has to name the block before the first core-local access on that core.
+/// Pointing `GS` at the block is left to the caller, since how a core carries
+/// its base is architecture-specific.
+///
+/// # Safety
+///
+/// `cpu_id` must be below the number of cores the bootloader has replicated
+/// the template for; otherwise this writes past the last block, into memory
+/// belonging to something else.
+///
+/// Nothing on the calling core may have touched a core-local variable yet,
+/// and no other core may be running on this block.
+#[inline]
+pub unsafe fn init_block_base(cpu_id: usize) -> *const c_void {
+    let base = block_base(cpu_id);
+
+    // SAFETY: per the contract above, `base` names this core's block, whose
+    // first quadword is reserved for exactly this by the linker script.
+    unsafe { core::ptr::with_exposed_provenance_mut::<usize>(base as _).write(base as _) };
+
+    base
 }
 
 /// Declares one or more core-local variables.
@@ -61,6 +117,34 @@ unsafe extern "C" {
 /// (`pub(crate) static ...`) or parenthesised (`(pub(crate)) static ...`).
 /// Both spellings expand identically, and `()` is an explicit way to write
 /// "private".
+///
+/// A declaration may additionally ask for an exported accessor for its
+/// offset, which is how assembly and other non-Rust callers reach a
+/// core-local variable:
+///
+/// ```ignore
+/// core_local! {
+///     #[export_offset(__boot_stack_offset)]
+///     /// Boot stack of a core.
+///     pub static BOOT_STACK: Stack = Stack([0; SIZE]);
+/// }
+/// ```
+///
+/// This emits, next to the item itself,
+///
+/// ```ignore
+/// #[unsafe(no_mangle)]
+/// pub extern "C" fn __boot_stack_offset(cpu_id: usize) -> usize
+/// ```
+///
+/// which returns [`PerCPU::offset`] for `cpu_id`, i.e. the offset of that
+/// core's copy relative to `_percpu_start`. The symbol name has to be spelled
+/// out, since a `macro_rules!` macro cannot build an identifier from the name
+/// of the item.
+///
+/// `#[export_offset(...)]` must be the *first* attribute of the declaration:
+/// the macro matches it literally, and a preceding `#[...]` or doc comment
+/// would be swallowed by the generic attribute list instead.
 ///
 /// The items are deliberately *not* `static mut`: [`PerCPU`] carries its own
 /// [`UnsafeCell`], so mutation needs no `mut` on the item, and a plain
@@ -95,6 +179,62 @@ macro_rules! core_local {
             $(#[$attr])*
             $vis static $($tail)*
         }
+    };
+
+    // ---- exported offset accessor ----------------------------------------
+    //
+    // Internal rule emitting the accessor itself, shared by the two forms
+    // below.
+    (@offset $offset:ident, $name:ident) => {
+        #[doc = concat!(
+            "Offset of `", stringify!($name), "` in the core-local block of ",
+            "`cpu_id`, relative to `_percpu_start`."
+        )]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $offset(cpu_id: usize) -> usize {
+            $name.offset(cpu_id)
+        }
+    };
+
+    // The marker is matched literally, so it has to come first: the generic
+    // attribute list of the rules below would otherwise consume it as an
+    // ordinary `#[...]`. The parenthesised-visibility rules above pass it
+    // through as one of `$attr`, so both spellings of the visibility reach
+    // these rules.
+    //
+    // The item itself is emitted by re-entering the macro, which keeps the
+    // initialised and uninitialised forms in one place.
+
+    (
+        #[export_offset($offset:ident)]
+        $(#[$attr:meta])*
+        $vis:vis static $name:ident : $ty:ty = $init:expr;
+        $($rest:tt)*
+    ) => {
+        $crate::core_local! {
+            $(#[$attr])*
+            $vis static $name: $ty = $init;
+        }
+
+        $crate::core_local! { @offset $offset, $name }
+
+        $crate::core_local! { $($rest)* }
+    };
+
+    (
+        #[export_offset($offset:ident)]
+        $(#[$attr:meta])*
+        $vis:vis static $name:ident : $ty:ty;
+        $($rest:tt)*
+    ) => {
+        $crate::core_local! {
+            $(#[$attr])*
+            $vis static $name: $ty;
+        }
+
+        $crate::core_local! { @offset $offset, $name }
+
+        $crate::core_local! { $($rest)* }
     };
 
     // ---- emit, with an explicit initialiser -------------------------------
@@ -207,14 +347,43 @@ impl<T> PerCPU<T> {
         Self(RefCell::new(Some(value)))
     }
 
+    /// Offset of this variable within a single block.
+    ///
+    /// Taken as a difference rather than as a bare address: `.percpu` is
+    /// linked at a normal virtual address, and the subtraction also survives
+    /// PIE relocation, since both operands are shifted by the same base.
+    #[inline]
+    fn block_offset(&self) -> usize {
+        self as *const Self as usize - (&raw const _percpu_start) as usize
+    }
+
+    /// Offset of `cpu_id`'s copy of this variable, relative to
+    /// `_percpu_start`.
+    ///
+    /// The blocks sit one `_percpu_stride` apart and start at the template
+    /// itself, so `cpu_id`'s copy lives at
+    ///
+    /// ```text
+    /// _percpu_start + VAR.offset(cpu_id)
+    /// ```
+    ///
+    /// This is the way to reach a variable *without* going through `GS`:
+    /// early boot, where no core has a base yet, and code preparing another
+    /// core's block. A core reaching its own variable uses
+    /// [`with`](PerCPU::with) and friends instead, which resolve the block
+    /// through `GS` and need no core id.
+    ///
+    /// `cpu_id` is not validated — the core count is not known here, and an
+    /// id beyond it simply yields an offset past the last block.
+    #[inline]
+    pub fn offset(&self, cpu_id: usize) -> usize {
+        self.block_offset() + cpu_id * stride()
+    }
+
     /// This core's copy of the variable.
     #[inline]
     fn local(&self) -> &RefCell<Option<T>> {
-        // Offset of this variable within a block. Taken as a difference
-        // rather than as a bare address: `.percpu` is linked at a normal
-        // virtual address, and the subtraction also survives PIE relocation,
-        // since both operands are shifted by the same base.
-        let offset = self as *const Self as usize - (&raw const _percpu_start) as usize;
+        let offset = self.block_offset();
 
         // Offset 0 of every block holds that block's own base address.
         let base: usize;
@@ -229,7 +398,9 @@ impl<T> PerCPU<T> {
         // SAFETY: the block belongs to this core and lives for as long as the
         // kernel does, so handing out a reference borrowed from the template
         // is sound.
-        unsafe { &*core::ptr::with_exposed_provenance::<Self>(base + offset).cast::<RefCell<Option<T>>>() }
+        unsafe {
+            &*core::ptr::with_exposed_provenance::<Self>(base + offset).cast::<RefCell<Option<T>>>()
+        }
     }
 
     /// Runs `f` on this core's value.

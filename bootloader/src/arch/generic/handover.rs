@@ -78,5 +78,5 @@ pub trait HandOver {
     ///
     /// Violating these requirements may result in immediate undefined
     /// behavior, including processor exceptions or system reset.
-    unsafe fn handover(&mut self) -> bool;
+    unsafe fn handover(&mut self, cpu_id: usize) -> bool;
 }

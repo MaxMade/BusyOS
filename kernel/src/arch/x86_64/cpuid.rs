@@ -197,3 +197,61 @@ impl CPUID<0x80000001, 0x0> for ExtendedFunction {
         }
     }
 }
+
+/// CPUID leaf `0x00000007` sub-leaf `0x0` EBX — structured extended feature
+/// identifiers.
+#[bitfield(u32)]
+pub struct StructuredExtendedFeatureEBX {
+    /// `FSGSBASE` instructions (bit 0).
+    ///
+    /// When set, the `RDFSBASE`, `RDGSBASE`, `WRFSBASE` and `WRGSBASE`
+    /// instructions are supported. Executing them additionally requires
+    /// `CR4.FSGSBASE` to be set, otherwise a `#UD` exception is raised.
+    #[bits(1, access = RO)]
+    pub fsgsbase: bool,
+
+    /// Reserved (bits [31:1]).
+    #[bits(31)]
+    __: u32,
+}
+
+/// Typed result of CPUID leaf `0x00000007` sub-leaf `0x0`.
+///
+/// Provides structured extended feature information.
+///
+/// Note: EAX (maximum supported sub-leaf), ECX and EDX are exposed as raw
+/// `u32` values since their sub-fields are not required for feature detection.
+pub struct StructuredExtendedFeature {
+    eax: u32,
+    /// Structured Extended Feature `ebx` register.
+    pub ebx: StructuredExtendedFeatureEBX,
+    ecx: u32,
+    edx: u32,
+}
+
+impl CPUID<0x00000007, 0x0> for StructuredExtendedFeature {
+    fn eax(&self) -> u32 {
+        self.eax
+    }
+
+    fn ebx(&self) -> u32 {
+        self.ebx.into_bits()
+    }
+
+    fn ecx(&self) -> u32 {
+        self.ecx
+    }
+
+    fn edx(&self) -> u32 {
+        self.edx
+    }
+
+    unsafe fn from_raw(eax: u32, ebx: u32, ecx: u32, edx: u32) -> Self {
+        Self {
+            eax,
+            ebx: StructuredExtendedFeatureEBX::from_bits(ebx),
+            ecx,
+            edx,
+        }
+    }
+}
