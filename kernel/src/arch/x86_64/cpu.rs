@@ -12,6 +12,13 @@ pub struct CPU;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
 pub struct CPUID(u8);
 
+/// Id of the core the firmware starts the kernel on.
+///
+/// `EFI_MP_SERVICES_PROTOCOL` numbers the bootstrap processor zero, and the
+/// bootloader passes that number through, so a core can tell whether it is the
+/// one that has to do the work that happens once.
+pub const BOOT_CPUID: CPUID = CPUID(0);
+
 impl Display for CPUID {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.0)

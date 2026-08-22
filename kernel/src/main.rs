@@ -3,6 +3,7 @@
 
 pub mod arch;
 pub mod kernel;
+pub mod mem;
 pub mod user;
 pub mod utils;
 

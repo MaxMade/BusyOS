@@ -7,7 +7,7 @@
 //! said to be of *order* `k`. Every free block sits in the free list of its
 //! order, and a request is served from the smallest order that can hold it,
 //! splitting larger blocks in half until one of the right size falls out.
-//! 
+//!
 //! Freeing walks the same ladder back up: a block whose *buddy* — the other
 //! half of the block they were split from — is also free merges with it into
 //! one block of the next order, repeatedly, so that a run of frees leaves
@@ -507,6 +507,23 @@ impl<const MIN_SIZE_LOG: usize, const MAX_SIZE_LOG2: usize> Default
     fn default() -> Self {
         Self::new()
     }
+}
+
+// SAFETY: the free-list pointers are what makes this `!Send` by default, and
+// they name memory that belongs to no particular core: the allocator can be
+// moved to another one and still means the same thing.
+unsafe impl<const MIN_SIZE_LOG: usize, const MAX_SIZE_LOG2: usize> Send
+    for BuddyAllocator<MIN_SIZE_LOG, MAX_SIZE_LOG2>
+{
+}
+
+// SAFETY: every method that touches a free list takes `&mut self`, so sharing
+// an allocator hands out no way to disturb it. This exists so that one can
+// live in a `static` behind a lock, which is the only way it is meant to be
+// shared.
+unsafe impl<const MIN_SIZE_LOG: usize, const MAX_SIZE_LOG2: usize> Sync
+    for BuddyAllocator<MIN_SIZE_LOG, MAX_SIZE_LOG2>
+{
 }
 
 #[cfg(test)]

@@ -1,11 +1,13 @@
+use crate::arch::BOOT_CPUID;
 use crate::arch::CPU;
 use crate::arch::CPUID;
 use crate::arch::generic::cpu::CPU as _;
 use crate::core_local;
-use crate::kernel::core_local::{PerCPU, init_block_base};
 use crate::kernel::bootinfo::BOOTINFO;
-use crate::kernel::locking::RootToken;
+use crate::kernel::core_local::{PerCPU, init_block_base};
 use crate::kernel::locking::InitLevel;
+use crate::kernel::locking::RootToken;
+use crate::mem::heap::Heap;
 
 unsafe extern "C" {
     /// First byte of the `.percpu` template, defined by the linker script.
@@ -99,8 +101,7 @@ pub unsafe extern "C" fn __init_gs(cpu_id: usize) {
     // observe the write: this core has touched no core-local variable yet,
     // and no other core reaches this block.
     unsafe {
-        core::ptr::with_exposed_provenance_mut::<PerCPU<CPUID>>(slot)
-            .write(PerCPU::with_value(id))
+        core::ptr::with_exposed_provenance_mut::<PerCPU<CPUID>>(slot).write(PerCPU::with_value(id))
     };
 }
 
@@ -109,11 +110,18 @@ pub extern "C" fn start() -> i32 {
     let root_token = unsafe { RootToken::forge() };
     let (init_level, mut token) = InitLevel::enter(root_token);
 
+    // Get current cpu ID
+    let cpu_id = CPUID.with(|cpu_id| *cpu_id);
+
+    // TODO(@MaxMade): Remove me as soon as BOOTINFO is actually used.
     let bootinfo = unsafe { BOOTINFO.assume_init_ref() };
+
+    // Initialise global heap allocator
+    if cpu_id == BOOT_CPUID {
+        token = unsafe { Heap::early_initialisation(token) };
+    }
 
     init_level.leave(token);
 
     todo!();
 }
-
-
