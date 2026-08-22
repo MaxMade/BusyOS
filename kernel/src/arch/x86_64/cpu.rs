@@ -3,9 +3,29 @@
 
 use crate::arch::generic::cpu::InterruptFlag;
 use crate::arch::x86_64::rflags::RFLAGS;
+use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use core::num::TryFromIntError;
 
 #[derive(Debug)]
 pub struct CPU;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
+pub struct CPUID(u8);
+
+impl Display for CPUID {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<usize> for CPUID {
+    type Error = TryFromIntError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        let raw = u8::try_from(value)?;
+        Ok(Self(raw))
+    }
+}
 
 impl crate::arch::generic::cpu::CPU for CPU {
     /// Returns whether maskable interrupts are currently enabled.
@@ -30,10 +50,7 @@ impl crate::arch::generic::cpu::CPU for CPU {
     #[inline]
     unsafe fn raw_enable_interrupts() {
         unsafe {
-            core::arch::asm!(
-                "sti",
-                options(nostack, preserves_flags)
-            );
+            core::arch::asm!("sti", options(nostack, preserves_flags));
         }
     }
 
@@ -46,10 +63,7 @@ impl crate::arch::generic::cpu::CPU for CPU {
     #[inline]
     unsafe fn raw_disable_interrupts() {
         unsafe {
-            core::arch::asm!(
-                "cli",
-                options(nostack, preserves_flags)
-            );
+            core::arch::asm!("cli", options(nostack, preserves_flags));
         }
     }
 
@@ -58,6 +72,8 @@ impl crate::arch::generic::cpu::CPU for CPU {
 
     /// Kernel stack size.
     const KERNEL_STACK_SIZE: usize = 16 * 1024;
+
+    type CPUID = CPUID;
 }
 
 impl CPU {

@@ -1,4 +1,5 @@
 use crate::kernel::locking::PreviousToken;
+use core::fmt::{Debug,Display};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptFlag {
@@ -25,6 +26,12 @@ pub trait CPU {
     const STACK_ALIGNMENT: usize;
 
     const KERNEL_STACK_SIZE: usize;
+
+    /// Stated as bounds on the associated type rather than as a
+    /// `where Self::CPUID: ...` clause: the clause is self-referential —
+    /// proving it requires normalising `Self::CPUID`, which brings in the
+    /// very bounds being proven — and the solver gives up with `E0275`.
+    type CPUID: PartialEq + Eq + Ord + PartialOrd + Debug + Display + Clone + Copy;
 
     fn disable_interrupts<Token>(token: Token) -> InterruptState<Token>
     where
