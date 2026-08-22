@@ -336,42 +336,50 @@ impl Display for PageSize {
 
 /// Allocates and frees physical page frames.
 ///
-/// Implementors manage a pool of physical memory and hand out frames on demand.
-/// All operations require a token at or above the `MemoryManagement` lock level,
-/// enforcing that physical memory allocation always occurs under the correct
-/// lock hierarchy.
+/// Implementors manage a pool of physical memory and hand out frames on demand,
+/// one regular page at a time. A [`PageSize`] is a property of a *mapping* —
+/// how much of the address space one page table entry covers — not of the
+/// memory handed out here, and the only frames this trait is asked for are the
+/// page tables themselves, which are one regular page each. A huge or gigantic
+/// mapping is made from a frame its caller already holds.
+/// All operations require a token at or above the `Memory` lock level, enforcing
+/// that physical memory allocation always occurs under the correct lock
+/// hierarchy.
+///
+/// `Memory` rather than `MemoryManagement`: handing out frames *is* the raw
+/// memory this hierarchy names, and everything built on top of it — page
+/// mappings, the heap — sits at `MemoryManagement` and has to be able to reach
+/// down to it. A heap that runs dry refilling itself from the frame allocator
+/// is exactly that descent.
 ///
 /// The token is threaded through each call (consumed and returned) rather than
 /// held by the allocator, keeping it compatible with the hierarchy's linear
 /// token model.
 pub trait PageFrameAllocator {
-    /// Allocates a single physical page frame of the requested [`PageSize`].
+    /// Allocates a single physical page frame of
+    /// [`REGULAR_PAGE_SIZE`](Paging::REGULAR_PAGE_SIZE) bytes.
     ///
     /// Returns the physical address of the allocated frame together with the
     /// token on success, or the error together with the token on failure so
     /// the caller can continue using the hierarchy.
-    fn allocate<Token>(
-        page_size: PageSize,
-        token: Token,
-    ) -> Result<(PhysicalAddress<c_void>, Token), (Error, Token)>
+    ///
+    /// The frame is aligned to its own size, which is what a page table entry
+    /// requires of it.
+    fn allocate<Token>(token: Token) -> Result<(PhysicalAddress<c_void>, Token), (Error, Token)>
     where
-        Token: CanAcquire<level::MemoryManagement> + PreviousToken;
+        Token: CanAcquire<level::Memory> + PreviousToken;
 
     /// Frees a previously allocated physical page frame.
     ///
     /// # Safety
     ///
     /// - `phys_addr` must have been obtained from a previous call to
-    ///   [`allocate`](PageFrameAllocator::allocate) with the same `page_size`.
+    ///   [`allocate`](PageFrameAllocator::allocate).
     /// - The frame must not be referenced by any active page table entry.
     /// - Calling this twice for the same frame is undefined behaviour.
-    unsafe fn deallocate<Token>(
-        phys_addr: PhysicalAddress<c_void>,
-        page_size: PageSize,
-        token: Token,
-    ) -> Token
+    unsafe fn deallocate<Token>(phys_addr: PhysicalAddress<c_void>, token: Token) -> Token
     where
-        Token: CanAcquire<level::MemoryManagement> + PreviousToken;
+        Token: CanAcquire<level::Memory> + PreviousToken;
 }
 
 /// Architecture-generic interface for managing a hardware page table.

@@ -2,27 +2,23 @@ use core::ffi::c_void;
 
 use busyos::{
     arch::{
-        generic::paging::{Error as PagingError, PageFrameAllocator, PageSize, PhysicalAddress},
+        generic::paging::{Error as PagingError, PageFrameAllocator, PhysicalAddress},
     },
-    kernel::locking::{CanAcquire, PreviousToken, level::MemoryManagement},
+    kernel::locking::{
+        CanAcquire, PreviousToken,
+        level::{Memory, MemoryManagement},
+    },
 };
 
 /// A static [`PageFrameAllocator`].
 pub struct UEFIPageFrameAllocator;
 
 impl PageFrameAllocator for UEFIPageFrameAllocator {
-    fn allocate<Token>(
-        page_size: PageSize,
-        token: Token,
-    ) -> Result<(PhysicalAddress<c_void>, Token), (PagingError, Token)>
+    fn allocate<Token>(token: Token) -> Result<(PhysicalAddress<c_void>, Token), (PagingError, Token)>
     where
-        Token: CanAcquire<MemoryManagement> + PreviousToken,
+        Token: CanAcquire<Memory> + PreviousToken,
     {
-        // UEFI offers (seemingly) only 4 KiB page frames
-        if page_size != PageSize::Regular {
-            return Err((PagingError::OutOfMemory, token));
-        }
-
+        // One 4 KiB page, which is all UEFI hands out anyway.
         let phys_addr = match uefi::boot::allocate_pages(
             uefi::boot::AllocateType::AnyPages,
             uefi::boot::MemoryType::LOADER_DATA,
@@ -37,9 +33,9 @@ impl PageFrameAllocator for UEFIPageFrameAllocator {
         Ok((phys_addr, token))
     }
 
-    unsafe fn deallocate<Token>(_: PhysicalAddress<c_void>, _: PageSize, token: Token) -> Token
+    unsafe fn deallocate<Token>(_: PhysicalAddress<c_void>, token: Token) -> Token
     where
-        Token: CanAcquire<MemoryManagement> + PreviousToken,
+        Token: CanAcquire<Memory> + PreviousToken,
     {
         // XXX: Leak memory...
         //

@@ -1662,7 +1662,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
                     pd_entry.set_target(PageTableTarget::PageTable(PhysicalAddress::null()));
                     // Safety: pt_phys was allocated by map and is no longer
                     // referenced by any entry.
-                    token = unsafe { PFA::deallocate(pt_phys.cast(), PageSize::Regular, token) };
+                    token = unsafe { PFA::deallocate(pt_phys.cast(), token) };
                 }
 
                 // All PD entries have been cleared; free the PD frame.
@@ -1670,7 +1670,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
                 pdp_entry.set_target(PageTableTarget::PageTable(PhysicalAddress::null()));
                 // Safety: pd_phys was allocated by map and is no longer
                 // referenced by any entry.
-                token = unsafe { PFA::deallocate(pd_phys.cast(), PageSize::Regular, token) };
+                token = unsafe { PFA::deallocate(pd_phys.cast(), token) };
             }
 
             // All PDP entries have been cleared; free the PDP frame.
@@ -1678,10 +1678,10 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
             pml4_entry.set_target(PhysicalAddress::null());
             // Safety: pdp_phys was allocated by map and is no longer
             // referenced by any entry.
-            token = unsafe { PFA::deallocate(pdp_phys.cast(), PageSize::Regular, token) };
+            token = unsafe { PFA::deallocate(pdp_phys.cast(), token) };
         }
 
-        token = unsafe { PFA::deallocate(pml4_phys.cast(), PageSize::Regular, token) };
+        token = unsafe { PFA::deallocate(pml4_phys.cast(), token) };
 
         core::mem::forget(self);
 
@@ -1748,7 +1748,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
         let mut pml4_phys = self.cr3.pml4();
         let pml4 = match pml4_phys.is_null() {
             true => {
-                pml4_phys = match PFA::allocate(PageSize::Regular, token) {
+                pml4_phys = match PFA::allocate(token) {
                     Ok((phys, t)) => {
                         token = t;
                         phys.cast()
@@ -1785,7 +1785,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
                 unsafe { self.phys_to_virt(pdp_phys).as_mut() }
             }
             false => {
-                let pdp_phys: PhysicalAddress<PDP> = match PFA::allocate(PageSize::Regular, token) {
+                let pdp_phys: PhysicalAddress<PDP> = match PFA::allocate(token) {
                     Ok((phys, t)) => {
                         token = t;
                         phys.cast()
@@ -1796,7 +1796,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
                             self.cr3.set_pml4(PhysicalAddress::null());
                             // Safety: `p` was allocated by this call and
                             // has not yet been exposed to the hardware.
-                            token = unsafe { PFA::deallocate(p.cast(), PageSize::Regular, token) };
+                            token = unsafe { PFA::deallocate(p.cast(), token) };
                         }
                         return Err((error, token));
                     }
@@ -1857,7 +1857,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
                 PageTableTarget::Page(_) => return Err((PagingError::Conflict, token)),
             },
             false => {
-                let pd_phys: PhysicalAddress<PD> = match PFA::allocate(PageSize::Regular, token) {
+                let pd_phys: PhysicalAddress<PD> = match PFA::allocate(token) {
                     Ok((phys, t)) => {
                         token = t;
                         phys.cast()
@@ -1870,12 +1870,12 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
 
                             // Safety: `p` was allocated this call; not yet
                             // visible to hardware.
-                            token = unsafe { PFA::deallocate(p.cast(), PageSize::Regular, token) };
+                            token = unsafe { PFA::deallocate(p.cast(), token) };
                         }
                         if let Some(p) = pml4_phys_allocated {
                             self.cr3.set_pml4(PhysicalAddress::null());
                             // Safety: same guarantee as above.
-                            token = unsafe { PFA::deallocate(p.cast(), PageSize::Regular, token) };
+                            token = unsafe { PFA::deallocate(p.cast(), token) };
                         }
                         return Err((error, token));
                     }
@@ -1933,7 +1933,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
                 PageTableTarget::Page(_) => return Err((PagingError::Conflict, token)),
             },
             false => {
-                let pt_phys: PhysicalAddress<PT> = match PFA::allocate(PageSize::Regular, token) {
+                let pt_phys: PhysicalAddress<PT> = match PFA::allocate(token) {
                     Ok((phys, t)) => {
                         token = t;
                         phys.cast()
@@ -1948,19 +1948,19 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
 
                             // Safety: `p` was allocated this call; not yet
                             // visible to hardware.
-                            token = unsafe { PFA::deallocate(p.cast(), PageSize::Regular, token) };
+                            token = unsafe { PFA::deallocate(p.cast(), token) };
                         }
                         if let Some(p) = pdp_phys_allocated {
                             pml4_entry.set_present(false);
                             pml4_entry.set_target(PhysicalAddress::null());
 
                             // Safety: same guarantee as above.
-                            token = unsafe { PFA::deallocate(p.cast(), PageSize::Regular, token) };
+                            token = unsafe { PFA::deallocate(p.cast(), token) };
                         }
                         if let Some(p) = pml4_phys_allocated {
                             self.cr3.set_pml4(PhysicalAddress::null());
                             // Safety: same guarantee as above.
-                            token = unsafe { PFA::deallocate(p.cast(), PageSize::Regular, token) };
+                            token = unsafe { PFA::deallocate(p.cast(), token) };
                         }
                         return Err((error, token));
                     }
@@ -2076,8 +2076,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
 
                         // Safety: pdp_phys was allocated by map and is no
                         // longer referenced by any entry.
-                        token =
-                            unsafe { PFA::deallocate(pdp_phys.cast(), PageSize::Regular, token) };
+                        token = unsafe { PFA::deallocate(pdp_phys.cast(), token) };
                     }
 
                     return Ok((phys_addr.cast(), PageSize::Gigantic, token));
@@ -2107,8 +2106,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
 
                         // Safety: pd_phys was allocated by map and is no
                         // longer referenced by any entry.
-                        token =
-                            unsafe { PFA::deallocate(pd_phys.cast(), PageSize::Regular, token) };
+                        token = unsafe { PFA::deallocate(pd_phys.cast(), token) };
                     }
 
                     // Free the PDP if it is now empty.
@@ -2118,8 +2116,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
 
                         // Safety: pdp_phys was allocated by map and is no
                         // longer referenced by any entry.
-                        token =
-                            unsafe { PFA::deallocate(pdp_phys.cast(), PageSize::Regular, token) };
+                        token = unsafe { PFA::deallocate(pdp_phys.cast(), token) };
                     }
 
                     return Ok((phys_addr.cast(), PageSize::Huge, token));
@@ -2149,7 +2146,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
 
                     // Safety: pt_phys was allocated by map and is no longer
                     // referenced by any entry.
-                    token = unsafe { PFA::deallocate(pt_phys.cast(), PageSize::Regular, token) };
+                    token = unsafe { PFA::deallocate(pt_phys.cast(), token) };
                 }
 
                 // Free the PD if it is now empty.
@@ -2159,7 +2156,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
 
                     // Safety: pd_phys was allocated by map and is no longer
                     // referenced by any entry.
-                    token = unsafe { PFA::deallocate(pd_phys.cast(), PageSize::Regular, token) };
+                    token = unsafe { PFA::deallocate(pd_phys.cast(), token) };
                 }
 
                 // Free the PDP if it is now empty.
@@ -2169,7 +2166,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
 
                     // Safety: pdp_phys was allocated by map and is no longer
                     // referenced by any entry.
-                    token = unsafe { PFA::deallocate(pdp_phys.cast(), PageSize::Regular, token) };
+                    token = unsafe { PFA::deallocate(pdp_phys.cast(), token) };
                 }
 
                 Ok((phys_addr.cast(), PageSize::Regular, token))
@@ -2360,7 +2357,7 @@ impl<PFA: PageFrameAllocator> Drop for Paging<PFA> {
 mod test {
     use std::{
         cell::RefCell,
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         num::NonZero,
         sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
     };
@@ -2376,7 +2373,7 @@ mod test {
     const VIRT_PHYS_SHIFT: usize = 32 * 1024 * 1024 * 1024;
 
     std::thread_local! {
-        static PAGE_FRAMES: RefCell<HashMap<PhysicalAddress<c_void>, PageSize>> = RefCell::new(HashMap::new());
+        static PAGE_FRAMES: RefCell<HashSet<PhysicalAddress<c_void>>> = RefCell::new(HashSet::new());
     }
     static PAGE_FRAME_ADDR: AtomicUsize = AtomicUsize::new(VIRT_PHYS_SHIFT + 16 * 1024 * 1024);
 
@@ -2421,38 +2418,21 @@ mod test {
 
     impl PageFrameAllocator for TestPageFrameAllocator {
         fn allocate<Token>(
-            page_size: PageSize,
             token: Token,
         ) -> Result<(PhysicalAddress<c_void>, Token), (PagingError, Token)>
         where
-            Token: CanAcquire<level::MemoryManagement> + PreviousToken,
+            Token: CanAcquire<level::Memory> + PreviousToken,
         {
             // Calculate next address
-            let virt_addr = TestPageFrameAllocator::next_virtual_addr(page_size);
+            let virt_addr = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
 
             // Allocate page frame
-            let size = match page_size {
-                PageSize::Regular => REGULAR_PAGE_SIZE,
-                PageSize::Huge => HUGE_PAGE_SIZE,
-                PageSize::Gigantic => GIGANTIC_PAGE_SIZE,
-            };
-
-            let map_flags = match page_size {
-                PageSize::Regular => MapFlags::MAP_PRIVATE,
-                PageSize::Huge => {
-                    MapFlags::MAP_PRIVATE | MapFlags::MAP_HUGETLB | MapFlags::MAP_HUGE_2MB
-                }
-                PageSize::Gigantic => {
-                    MapFlags::MAP_PRIVATE | MapFlags::MAP_HUGETLB | MapFlags::MAP_HUGE_1GB
-                }
-            };
-
             let virt_addr = match unsafe {
                 nix::sys::mman::mmap_anonymous(
                     Some(NonZero::new(virt_addr.addr() as usize).unwrap()),
-                    NonZero::new(size).unwrap(),
+                    NonZero::new(REGULAR_PAGE_SIZE).unwrap(),
                     ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                    map_flags,
+                    MapFlags::MAP_PRIVATE,
                 )
             } {
                 Ok(phys_addr) => VirtualAddress::new(phys_addr.as_ptr()),
@@ -2464,43 +2444,28 @@ mod test {
             let phys_addr = Self::virt_to_phys(virt_addr);
 
             // Update allocator statistics
-            let prev =
-                PAGE_FRAMES.with_borrow_mut(|page_frames| page_frames.insert(phys_addr, page_size));
-            if let Some(prev) = prev {
-                panic!("Found duplicate page frame {:p} ({})", phys_addr, prev);
+            let known = PAGE_FRAMES.with_borrow_mut(|page_frames| page_frames.insert(phys_addr));
+            if !known {
+                panic!("Found duplicate page frame {:p}", phys_addr);
             }
 
             Ok((phys_addr, token))
         }
 
-        unsafe fn deallocate<Token>(
-            phys_addr: PhysicalAddress<c_void>,
-            page_size: PageSize,
-            token: Token,
-        ) -> Token
+        unsafe fn deallocate<Token>(phys_addr: PhysicalAddress<c_void>, token: Token) -> Token
         where
-            Token: CanAcquire<level::MemoryManagement> + PreviousToken,
+            Token: CanAcquire<level::Memory> + PreviousToken,
         {
             // Update allocator statistics
-            let prev = PAGE_FRAMES.with_borrow_mut(|page_frames| page_frames.remove(&phys_addr));
-            match prev {
-                Some(prev) => {
-                    if prev != page_size {
-                        panic!(
-                            "Detected conflict page size for deallocate! expected: {}, got: {}",
-                            prev, page_size
-                        );
-                    }
-                }
-                None => {
-                    panic!(
-                        "Detected unknown physical address for deallocate! {:p}, got: {}",
-                        phys_addr, page_size
-                    );
-                }
+            let known = PAGE_FRAMES.with_borrow_mut(|page_frames| page_frames.remove(&phys_addr));
+            if !known {
+                panic!(
+                    "Detected unknown physical address for deallocate! {:p}",
+                    phys_addr
+                );
             }
 
-            return token;
+            token
         }
     }
 
