@@ -4,6 +4,7 @@
 pub mod arch;
 pub mod elf_loader;
 pub mod paging;
+pub mod memory_map;
 
 extern crate alloc;
 
@@ -50,6 +51,7 @@ fn main() -> Status {
     //
     // From then on, only UEFI configuration tables and runtime service can be used.
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
+    memory_map::parse(memory_map, bootinfo);
 
     // Simulate system-call exit
     syscall_level.leave(token);

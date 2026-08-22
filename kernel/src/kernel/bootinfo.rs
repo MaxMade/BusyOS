@@ -1,8 +1,10 @@
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
+use core::array;
 
 use crate::arch::Bootinfo as ArchBootinfo;
 use crate::arch::generic::paging::{PhysicalAddress, VirtualAddress};
+use crate::utils::range_tree::Range;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -52,6 +54,8 @@ pub struct Bootinfo {
     /// Size of the kernel `.percpu` segment.
     pub kernel_percpu_size: usize,
 
+    pub memory_ranges: [Range<PhysicalAddress<c_void>, usize>; 64],
+
     /// Architecture-specific boot information
     pub arch_bootinfo: ArchBootinfo,
 }
@@ -75,6 +79,7 @@ impl Default for Bootinfo {
             kernel_percpu_start: PhysicalAddress::null(),
             kernel_percpu_size: 0,
             num_cpus: 0,
+            memory_ranges: array::from_fn(|_| Range::new(PhysicalAddress::null(), 0)),
         }
     }
 }

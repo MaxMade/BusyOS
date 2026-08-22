@@ -5,6 +5,10 @@ use syn::{parse_macro_input, DeriveInput};
 /// Derives a complete pointer-wrapper API for a newtype struct wrapping `*mut T`.
 ///
 /// The target struct must be of the form `struct Foo<T>(*mut T)`.
+///
+/// Besides the pointer methods this emits the comparison, hashing and
+/// formatting impls, and the byte arithmetic a `Range` needs from its `Base`:
+/// `Self + usize -> Self` and `Self - Self -> usize`.
 #[proc_macro_derive(Address)]
 pub fn derive_address(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -312,6 +316,37 @@ pub fn derive_address(input: TokenStream) -> TokenStream {
         impl #impl_generics core::hash::Hash for #name #ty_generics #where_clause {
             fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
                 self.0.hash(state)
+            }
+        }
+
+        // --- Range arithmetic ---
+        //
+        // `Range<Self, usize>` measures its length in *bytes*, so these count
+        // bytes as well, unlike `add`/`sub`, which step in elements of `T`.
+        //
+        // Wrapping, and therefore safe: `add` and friends are `unsafe`
+        // because they promise to stay within one allocated object, which an
+        // address that merely delimits a region need not do.
+
+        impl #impl_generics core::ops::Add<usize> for #name #ty_generics #where_clause {
+            type Output = Self;
+
+            fn add(self, bytes: usize) -> Self {
+                Self(self.0.wrapping_byte_add(bytes))
+            }
+        }
+
+        /// The distance from `origin` to `self` in bytes.
+        ///
+        /// # Panics
+        ///
+        /// If `self` lies below `origin`, in builds with overflow checks. This
+        /// is the half-open `end - base` of a range, which is never negative.
+        impl #impl_generics core::ops::Sub for #name #ty_generics #where_clause {
+            type Output = usize;
+
+            fn sub(self, origin: Self) -> usize {
+                self.addr() - origin.addr()
             }
         }
     }
