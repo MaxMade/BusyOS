@@ -4,6 +4,8 @@ use crate::arch::generic::cpu::CPU as _;
 use crate::core_local;
 use crate::kernel::core_local::{PerCPU, init_block_base};
 use crate::kernel::bootinfo::BOOTINFO;
+use crate::kernel::locking::RootToken;
+use crate::kernel::locking::InitLevel;
 
 unsafe extern "C" {
     /// First byte of the `.percpu` template, defined by the linker script.
@@ -104,9 +106,14 @@ pub unsafe extern "C" fn __init_gs(cpu_id: usize) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn start() -> i32 {
+    let root_token = unsafe { RootToken::forge() };
+    let (init_level, mut token) = InitLevel::enter(root_token);
+
     let bootinfo = unsafe { BOOTINFO.assume_init_ref() };
 
-    loop { }
+    init_level.leave(token);
+
+    todo!();
 }
 
 

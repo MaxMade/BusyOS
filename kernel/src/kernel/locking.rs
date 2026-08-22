@@ -5,6 +5,10 @@ use kernel_derive::{Locking, lock_id};
 /// Base lock level hierarchy
 #[derive(Locking)]
 pub enum Level {
+    // System initialisation, from the bootstrap stub until the first thread
+    // is scheduled. The top of the hierarchy, so init code may acquire
+    // anything; no lock of its own lives here, and nothing can acquire it.
+    Init,
     Syscall,
     // Top half of interrupt handling.
     Epilogue,
@@ -25,6 +29,31 @@ pub enum Level {
     Memory,
     // Bottom half of interrupt handling.
     Prologue,
+}
+
+#[lock_id(Init)]
+pub struct InitLevelID;
+
+pub struct InitLevel;
+
+impl InitLevel {
+    pub fn enter(root_token: RootToken) -> (Self, Token<InitLevelID, RootToken, Shared>) {
+        core::mem::forget(root_token);
+
+        let token = unsafe { Token::forge() };
+        (Self, token)
+    }
+
+    pub fn leave(self, token: Token<InitLevelID, RootToken, Shared>) {
+        core::mem::forget(self);
+        core::mem::forget(token);
+    }
+}
+
+impl Drop for InitLevel {
+    fn drop(&mut self) {
+        panic!("Init level must never be left implicitly! Use InitLevel::leave(...) instead!");
+    }
 }
 
 #[lock_id(Syscall)]
