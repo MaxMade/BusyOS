@@ -1,16 +1,8 @@
-use core::cell::RefCell;
-use core::ffi::c_void;
-
 use crate::arch::CPU;
 use crate::arch::generic::cpu::CPU as _;
 use crate::core_local;
 use crate::kernel::core_local::init_block_base;
 use crate::kernel::bootinfo::BOOTINFO;
-
-unsafe extern "C" {
-    /// First byte of the `.percpu` template, defined by the linker script.
-    static _percpu_start: u8;
-}
 
 #[repr(C, align(16))] // TODO(@MaxMade): Somehow, use CPU::STACK_ALIGNMENT instead...
 #[derive(Debug, Clone, Copy)]
@@ -19,8 +11,34 @@ pub struct Stack([u8; CPU::KERNEL_STACK_SIZE]);
 core_local! {
     #[export_offset(__boot_stack_offset)]
     /// Stack the bootstrap stub runs on, one per core.
+    ///
+    /// Never read as a Rust value: the stub reaches it before any core has a
+    /// `GS` base, as
+    ///
+    /// ```text
+    /// _percpu_start + __boot_stack_offset(cpu_id) + __BOOT_STACK_SIZE
+    /// ```
+    ///
+    /// which is the top of this core's stack, and grows down from there.
     pub static BOOT_STACK: Stack = Stack([0; CPU::KERNEL_STACK_SIZE]);
 }
+
+/// Size of one boot stack, for the bootstrap stub to turn
+/// `__boot_stack_offset` into a stack pointer.
+///
+/// `__boot_stack_offset` names the *start* of a core's `BOOT_STACK` slot,
+/// while a stack has to be entered at its top, so the stub needs the size as
+/// well — and it cannot see `CPU::KERNEL_STACK_SIZE` itself, since `head.S`
+/// is assembled on its own.
+///
+/// The slot holds a `PerCPU<Stack>`, i.e. the stack behind a header of
+/// unspecified size, so the top computed this way can be up to that header's
+/// size below the slot's end. It is never *past* it, which is what matters:
+/// growing down from it stays inside this core's own slot. The stack stays
+/// aligned, too — the slot is `align_of::<Stack>()`-aligned and the size is a
+/// multiple of that.
+#[unsafe(no_mangle)]
+pub static __BOOT_STACK_SIZE: usize = size_of::<Stack>();
 
 /// Points `gs` at the core-local block of `cpu_id`.
 ///
@@ -38,18 +56,6 @@ pub unsafe extern "C" fn __init_gs(cpu_id: usize) {
     // SAFETY: `base` is the block belonging to this core, which is what `GS`
     // is expected to anchor; `CR4.FSGSBASE` is set per the contract above.
     unsafe { CPU::set_gs_base(base as _) };
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn __boot_stack(cpu_id: usize) -> *const c_void {
-    let offset = BOOT_STACK.offset(cpu_id);
-    let base = (&raw const _percpu_start) as usize;
-
-    let stack = unsafe {
-        &*((base + offset) as *mut RefCell<Option<Stack>>)
-    };
-
-    unsafe { stack.borrow().unwrap().0.as_ptr().byte_add(CPU::KERNEL_STACK_SIZE - CPU::STACK_ALIGNMENT) as _}
 }
 
 #[unsafe(no_mangle)]

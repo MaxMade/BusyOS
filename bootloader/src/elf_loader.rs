@@ -244,8 +244,25 @@ impl ELF {
         }
 
         // Resolve relocations
+        //
+        // The kernel is linked as a PIE, but it is loaded at exactly the
+        // addresses it was linked for, so the load bias is zero and a
+        // `R_RELATIVE` entry degenerates to storing its addend. The store
+        // itself cannot be skipped: `RELA` keeps the value in the entry and
+        // leaves the place zeroed, so an unresolved relocation reads as a
+        // null pointer at runtime.
+        //
+        // The target address is a link-time (virtual) one, while the image
+        // still lives at the physical address it was loaded to, hence the
+        // translation relative to `_kernel_start`.
         if let Some(section_headers) = elf.section_headers() {
             for section in section_headers.iter() {
+                // Relocations of sections that are not part of the image
+                // (debug information, for one) have nothing to be applied to.
+                if section.sh_flags & elf::abi::SHF_ALLOC as u64 == 0 {
+                    continue;
+                }
+
                 // Try to resolve REL
                 if let Ok(rels) = elf.section_data_as_rels(&section) {
                     for rel in rels {
@@ -256,7 +273,40 @@ impl ELF {
                 // Try to resolve RELA
                 if let Ok(relas) = elf.section_data_as_relas(&section) {
                     for rela in relas {
-                        todo!("Handle relocation (with addend): {:?}", rela);
+                        if rela.r_type != crate::arch::ELF::R_RELATIVE {
+                            todo!("Handle relocation (with addend): {:?}", rela);
+                        }
+
+                        let target = rela.r_offset as usize;
+                        let offset = match target.checked_sub(_kernel_start.addr()) {
+                            Some(offset) => offset,
+                            None => panic!(
+                                "Relocation of {:#x} lies before `_kernel_start` @ {:p}",
+                                target, _kernel_start
+                            ),
+                        };
+
+                        if offset + size_of::<usize>() > mem.len() {
+                            panic!(
+                                "Relocation of {:#x} lies past the {:#x} byte allocation",
+                                target,
+                                mem.len()
+                            );
+                        }
+
+                        // TODO(@MaxMade): A relocation inside `.percpu` patches
+                        // the template only, while every core runs on its own
+                        // copy of it: the fixup has to be applied to each of
+                        // the `num_cpus.total` blocks, and one pointing into
+                        // `.percpu` itself additionally has to name the block
+                        // it is applied to rather than the template.
+                        if offset >= percpu_offset {
+                            todo!("Handle relocation inside `.percpu`: {:?}", rela);
+                        }
+
+                        let value = rela.r_addend as usize;
+                        mem[offset..offset + size_of::<usize>()]
+                            .copy_from_slice(&value.to_ne_bytes());
                     }
                 }
             }

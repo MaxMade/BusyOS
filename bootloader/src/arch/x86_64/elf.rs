@@ -7,6 +7,8 @@ use elf::{ElfBytes, endian::AnyEndian};
 pub struct ELF;
 
 impl crate::arch::generic::elf::ELF for ELF {
+    const R_RELATIVE: u32 = elf::abi::R_X86_64_RELATIVE;
+
     fn check_header(elf: &ElfBytes<AnyEndian>) {
         if elf.ehdr.class != elf::file::Class::ELF64 {
             panic!("Unexpected ELF class: {:?}", elf.ehdr.class);
