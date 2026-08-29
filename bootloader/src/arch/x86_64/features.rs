@@ -24,7 +24,6 @@ impl crate::arch::generic::features::Features for Features {
     /// - `fsgsbase`: support for the `RDFSBASE`/`RDGSBASE`/`WRFSBASE`/`WRGSBASE`
     /// instructions.
     fn activate() {
-
         // Check if `syscall`/`sysret` instructions are available
         let extended_function = unsafe { ExtendedFunction::read() };
         if !extended_function.edx.syscall() {

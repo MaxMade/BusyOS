@@ -1,6 +1,6 @@
 use busyos::kernel::{
     bootinfo::Bootinfo,
-    locking::{level::Epilogue, CanAcquire, PreviousToken},
+    locking::{CanAcquire, PreviousToken, level::Epilogue},
 };
 
 /// Prepares and performs the architecture-specific transition from the

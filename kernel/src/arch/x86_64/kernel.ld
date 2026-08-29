@@ -161,9 +161,11 @@ SECTIONS
      * (_percpu_stride).
      *
      * Placed last, after .bss, so that the template forms a page-aligned tail
-     * of the image: once every core has its copy the pages in
-     * [_percpu_start, _kernel_end) are dead and can be handed back to the
-     * frame allocator without leaving a hole in the middle of the kernel.
+     * of the image: the copies are simply appended behind _kernel_end, which
+     * needs no hole in the middle of the kernel and keeps all blocks in one
+     * contiguous range.  The template is not spare storage — core 0 runs on
+     * it (see `block_base`), so the pages stay live for as long as any core
+     * does.
      */
 
     .percpu ALIGN(4K) : AT(ADDR(.percpu) - KERNEL_VMA_START + KERNEL_PHYS_BASE)

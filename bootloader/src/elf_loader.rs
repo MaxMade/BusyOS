@@ -136,7 +136,7 @@ impl ELF {
             Err(error) => panic!("Unable to determine number of core: {}", error),
         };
 
-        let num_cpus = match mp.get_number_of_processors()  {
+        let num_cpus = match mp.get_number_of_processors() {
             Ok(count) => count,
             Err(error) => panic!("Unable to determine number of core: {}", error),
         };
@@ -149,7 +149,10 @@ impl ELF {
             panic!("Unexpected value for `_percpu_start`: {:p}", _percpu_start);
         }
         if _percpu_stride.addr() % REGULAR_PAGE_SIZE != 0 {
-            panic!("Unexpected value for `_percpu_stride`: {:p}", _percpu_stride);
+            panic!(
+                "Unexpected value for `_percpu_stride`: {:p}",
+                _percpu_stride
+            );
         }
         if _percpu_size.addr() > _percpu_stride.addr() {
             panic!(
@@ -379,6 +382,26 @@ impl ELF {
         );
         bootinfo.kernel_bss_start = _bss_start;
         bootinfo.kernel_bss_size = bss_size;
+
+        // `.percpu` is handed over as the whole replicated range rather than
+        // as the template alone, so that the kernel can map every core's
+        // block in one piece: block 0 is the template the segment loop wrote,
+        // the copies made above follow it one stride apart.
+        //
+        // The range therefore ends behind the *last block*, not one stride
+        // behind its start — a stride is only rounded up to the section's own
+        // alignment when that exceeds a page, and the padding of the final
+        // block lies past the allocation.
+        //
+        // Both ends are page-aligned: `_percpu_start` and `_percpu_stride`
+        // were checked to be above, and `_percpu_size` is, as `.percpu` ends
+        // on a page boundary.
+        let _percpu_start =
+            PhysicalAddress::new((mem.as_ptr().addr() + percpu_offset) as *mut c_void);
+        bootinfo.kernel_percpu_start = _percpu_start;
+        bootinfo.kernel_percpu_size =
+            percpu_stride * num_cpus.total.saturating_sub(1) + percpu_size;
+        bootinfo.num_cpus = num_cpus.total;
 
         bootinfo
     }

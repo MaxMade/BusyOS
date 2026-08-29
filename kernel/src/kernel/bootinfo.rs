@@ -1,6 +1,6 @@
+use core::array;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
-use core::array;
 
 use crate::arch::Bootinfo as ArchBootinfo;
 use crate::arch::generic::paging::{PhysicalAddress, VirtualAddress};
@@ -49,9 +49,16 @@ pub struct Bootinfo {
     pub kernel_bss_size: usize,
 
     /// Physical address of the kernel `.percpu` segment.
+    ///
+    /// This is core 0's block: the bootloader replicates the template in
+    /// place, so the first block is the template itself.
     pub kernel_percpu_start: PhysicalAddress<c_void>,
 
-    /// Size of the kernel `.percpu` segment.
+    /// Size of the kernel `.percpu` segment, spanning the blocks of *all*
+    /// [`num_cpus`](Self::num_cpus) cores rather than a single one.
+    ///
+    /// The blocks sit one stride apart in one contiguous range, so mapping
+    /// this range maps every core's block.
     pub kernel_percpu_size: usize,
 
     pub memory_ranges: [Range<PhysicalAddress<c_void>, usize>; 64],

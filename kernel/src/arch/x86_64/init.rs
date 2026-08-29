@@ -1,13 +1,17 @@
 use crate::arch::BOOT_CPUID;
 use crate::arch::CPU;
 use crate::arch::CPUID;
+use crate::arch::Paging;
 use crate::arch::generic::cpu::CPU as _;
+use crate::arch::generic::paging::Paging as _;
 use crate::core_local;
 use crate::kernel::bootinfo::BOOTINFO;
 use crate::kernel::core_local::{PerCPU, init_block_base};
 use crate::kernel::locking::InitLevel;
 use crate::kernel::locking::RootToken;
+use crate::kernel::locking::Token;
 use crate::mem::heap::Heap;
+use crate::mem::page_frames::EarlyPageFrames;
 
 unsafe extern "C" {
     /// First byte of the `.percpu` template, defined by the linker script.
@@ -120,6 +124,14 @@ pub extern "C" fn start() -> i32 {
     if cpu_id == BOOT_CPUID {
         token = unsafe { Heap::early_initialisation(token) };
     }
+
+    // Setup kernel mapping
+    let (paging, token): (Paging<EarlyPageFrames>, Token<_, _, _>) =
+        match Paging::kernel_mapping(bootinfo, token) {
+            Ok((paging, token)) => (paging, token),
+            Err((error, _)) => panic!("Unable to setup kernel mapping: {}", error),
+        };
+    unsafe { paging.activate() };
 
     init_level.leave(token);
 

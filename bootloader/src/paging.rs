@@ -1,9 +1,7 @@
 use core::ffi::c_void;
 
 use busyos::{
-    arch::{
-        generic::paging::{Error as PagingError, PageFrameAllocator, PhysicalAddress},
-    },
+    arch::generic::paging::{Error as PagingError, PageFrameAllocator, PhysicalAddress},
     kernel::locking::{
         CanAcquire, PreviousToken,
         level::{Memory, MemoryManagement},
@@ -14,7 +12,9 @@ use busyos::{
 pub struct UEFIPageFrameAllocator;
 
 impl PageFrameAllocator for UEFIPageFrameAllocator {
-    fn allocate<Token>(token: Token) -> Result<(PhysicalAddress<c_void>, Token), (PagingError, Token)>
+    fn allocate<Token>(
+        token: Token,
+    ) -> Result<(PhysicalAddress<c_void>, Token), (PagingError, Token)>
     where
         Token: CanAcquire<Memory> + PreviousToken,
     {

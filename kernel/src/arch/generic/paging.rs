@@ -393,7 +393,7 @@ pub trait PageFrameAllocator {
 /// # Activation
 ///
 /// A newly created page table is inactive — it has no effect on address
-/// translation until [`active`](Paging::active) installs it in the hardware
+/// translation until [`activate`](Paging::activate) installs it in the hardware
 /// register (CR3 on x86_64, `TTBR0`/`TTBR1` on AArch64).
 ///
 /// # Safety
@@ -529,5 +529,5 @@ pub trait Paging<PFA: PageFrameAllocator> {
     ///   instruction pointer, stack, and any interrupt handlers.
     /// - Activating an incomplete or malformed page table will immediately
     ///   cause a fault or silent memory corruption.
-    unsafe fn active(&self);
+    unsafe fn activate(&self);
 }

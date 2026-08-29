@@ -3,8 +3,8 @@
 
 pub mod arch;
 pub mod elf_loader;
-pub mod paging;
 pub mod memory_map;
+pub mod paging;
 
 extern crate alloc;
 

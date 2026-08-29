@@ -348,4 +348,3 @@ mod test {
         assert!(*counter.get_mut() == NUM_EXCLUSIVE * ITERATIONS);
     }
 }
-

@@ -220,4 +220,3 @@ where
         unsafe { &*self.lock.data.get() }
     }
 }
-

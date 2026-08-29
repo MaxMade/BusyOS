@@ -1,4 +1,4 @@
-use core::ffi::{c_void};
+use core::ffi::c_void;
 
 use busyos::{
     arch::CPU,
@@ -49,7 +49,7 @@ impl crate::arch::generic::handover::HandOver for HandOver {
 
     unsafe fn handover(&mut self, cpu_id: usize) -> bool {
         // Activate temporary mapping
-        unsafe { self.paging.active() };
+        unsafe { self.paging.activate() };
 
         // Jump to BUSYOS kernel
         let ptr = self.entry.as_ptr() as *const c_void;

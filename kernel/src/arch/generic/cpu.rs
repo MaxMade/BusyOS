@@ -1,5 +1,5 @@
 use crate::kernel::locking::PreviousToken;
-use core::fmt::{Debug,Display};
+use core::fmt::{Debug, Display};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptFlag {

@@ -1267,6 +1267,13 @@ impl<PFA: PageFrameAllocator> Paging<PFA> {
 
     /// Creates the initial kernel page tables.
     ///
+    /// Maps a direct map of all physical memory, followed by every segment of
+    /// the kernel image with the rights it asks for, each at its link-time
+    /// address. `.percpu` is part of that image, and it has to be: a core
+    /// reaches its boot stack and every core-local variable through addresses
+    /// in this window, so [`activate`](crate::arch::generic::paging::Paging::activate)
+    /// would pull the ground out from under the caller without it.
+    ///
     /// # Address Space Layout
     ///
     /// ```text
@@ -1293,6 +1300,7 @@ impl<PFA: PageFrameAllocator> Paging<PFA> {
     /// │  │   Kernel image        │  │                           │
     /// │  │   .text / .rodata     │  │                           │
     /// │  │   .data  / .bss       │  │                           │
+    /// │  │   .percpu (per core)  │  │                           │
     /// │  │   stack  / heap       │  │                           │
     /// │  │                       │  │                           │
     /// │  │        64 TiB         │  │                           │
@@ -1324,7 +1332,7 @@ impl<PFA: PageFrameAllocator> Paging<PFA> {
         let mut page_tables = Self {
             cr3: CR3::new(),
             phantom: PhantomData,
-            page_table_shift: 0xffff_c000_0000_0000,
+            page_table_shift: bootinfo.kernel_virt_phys_offset,
         };
 
         // Declare helper function
@@ -1476,6 +1484,36 @@ impl<PFA: PageFrameAllocator> Paging<PFA> {
             }
         };
 
+        // Map the core-local blocks
+        //
+        // Unlike the segments above, `.percpu` is not a single stretch of
+        // image: the bootloader replicated the template into one block per
+        // core, and the range handed over spans all `num_cpus` of them. They
+        // are contiguous, so one mapping covers every core.
+        //
+        // A core reaches its own block through its `GS` base, which holds a
+        // link-time address inside this very range — as does the boot stack
+        // it is already running on. Both would fault the moment these tables
+        // go live if the range were left out.
+        let token = match try_map(
+            &mut page_tables,
+            VirtualAddress::new(
+                (bootinfo.kernel_percpu_start.addr() + bootinfo.kernel_virt_phys_offset) as _,
+            ),
+            bootinfo.kernel_percpu_start,
+            bootinfo.kernel_percpu_size,
+            AccessRights::custom(true, true, false),
+            token,
+        ) {
+            Ok(token) => token,
+            Err((error, mut token)) => {
+                // Free page tables
+                token = unsafe { page_tables.destroy(|_, _, token| token, token) };
+                return Err((error, token));
+            }
+        };
+
+        page_tables.page_table_shift = 0xFFFF_C000_0000_0000;
         Ok((page_tables, token))
     }
 
@@ -1500,7 +1538,7 @@ impl<PFA: PageFrameAllocator> Paging<PFA> {
     /// Creates an uninitialized set of page tables.
     ///
     /// The page table is inactive until a PML4 is allocated (on the first
-    /// call to [`map`](Paging::map)) and activated via [`Paging::active`].
+    /// call to [`map`](Paging::map)) and activated via [`Paging::activate`].
     pub const fn new(page_table_shift: usize) -> Self {
         Self {
             cr3: CR3::new(),
@@ -2328,7 +2366,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
         unsafe { cr3.write() };
     }
 
-    unsafe fn active(&self) {
+    unsafe fn activate(&self) {
         // Safety: the caller is responsible for ensuring the page table covers
         // all addresses currently in use, including the instruction pointer and
         // stack. See [`CR3::write`] for the full contract.

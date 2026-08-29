@@ -1,8 +1,8 @@
 //! Architecture-specific abstractions.
 
+pub mod generic;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
-pub mod generic;
 
 // Export all x86_64-specific implementations
 #[cfg(target_arch = "x86_64")]
