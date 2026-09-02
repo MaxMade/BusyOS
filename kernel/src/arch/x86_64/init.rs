@@ -12,6 +12,7 @@ use crate::kernel::locking::RootToken;
 use crate::kernel::locking::Token;
 use crate::mem::heap::Heap;
 use crate::mem::page_frames::EarlyPageFrames;
+use crate::mem::page_frames::PageFrames;
 
 unsafe extern "C" {
     /// First byte of the `.percpu` template, defined by the linker script.
@@ -132,6 +133,10 @@ pub extern "C" fn start() -> i32 {
             Err((error, _)) => panic!("Unable to setup kernel mapping: {}", error),
         };
     unsafe { paging.activate() };
+
+    // Prepare Page frames
+    let token = PageFrames::handover_from_early(token);
+    let token = unsafe { PageFrames::init_from_bootinfo(token) };
 
     init_level.leave(token);
 

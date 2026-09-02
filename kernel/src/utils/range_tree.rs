@@ -15,6 +15,7 @@
 //!   `usize`, or a newtype wrapping a raw pointer).
 //! - `Length`: the type used for sizes (e.g. `u64`, `usize`).
 
+use crate::arch::generic::paging::{PhysicalAddress, VirtualAddress};
 use crate::utils::allocator::{Allocator, Error as AllocatorError};
 use core::cmp::Ordering;
 use core::fmt::{Debug, Display, Pointer};
@@ -240,13 +241,13 @@ where
     ///
     /// # Examples
     ///
-    /// ```
-    /// let a = Range::new(0u64, 10u64);  // [0, 10[
-    /// let b = Range::new(5u64, 10u64);  // [5, 15[
-    /// assert!(Range::overlap(&a, &b));    // share [5, 10[
+    /// ```text
+    /// let a = Range::new(0u64, 10u64);   // [0, 10[
+    /// let b = Range::new(5u64, 10u64);   // [5, 15[
+    /// assert!(Range::overlap(&a, &b));   // share [5, 10[
     ///
-    /// let c = Range::new(10u64, 5u64);  // [10, 15[
-    /// assert!(!Range::overlap(&a, &c));   // adjacent, not overlapping
+    /// let c = Range::new(10u64, 5u64);   // [10, 15[
+    /// assert!(!Range::overlap(&a, &c));  // adjacent, not overlapping
     /// ```
     #[inline]
     pub fn overlap(a: &Self, b: &Self) -> bool {
@@ -271,12 +272,12 @@ where
     ///
     /// # Examples
     ///
-    /// ```
-    /// let a = Range::new(0u64, 10u64);    // [0,  10[
-    /// let b = Range::new(10u64, 10u64);   // [10, 20[
+    /// ```text
+    /// let a = Range::new(0u64, 10u64);   // [0,  10[
+    /// let b = Range::new(10u64, 10u64);  // [10, 20[
     /// assert!(Range::adjecent(&a, &b));
     ///
-    /// let c = Range::new(11u64, 10u64);   // [11, 21[ — gap, not adjacent
+    /// let c = Range::new(11u64, 10u64);  // [11, 21[ — gap, not adjacent
     /// assert!(!Range::adjecent(&a, &c));
     /// ```
     ///
@@ -430,6 +431,110 @@ where
         let merged_base = self.base.min(other.base);
         let merged_end = self_end.max(other_end);
         Ok(Range::new(merged_base, merged_end - merged_base))
+    }
+}
+
+impl<T> Range<VirtualAddress<T>, usize> {
+    /// Moves the base up to the next multiple of `alignment`, returning what
+    /// is left of the range.
+    ///
+    /// Only the *base* is aligned. The length shrinks by however many bytes
+    /// were skipped and is not rounded down afterwards, so the result is the
+    /// largest sub-range of `self` that starts on an `alignment` boundary —
+    /// which is what a consumer that can only take aligned virtual addresses,
+    /// such as a page frame allocator, can actually use out of it.
+    ///
+    /// An already aligned range is returned unchanged.
+    ///
+    /// ```text
+    /// [0x1000, 0x4000[.align(0x1000) == Some([0x1000, 0x4000[)  // untouched
+    /// [0x0800, 0x4000[.align(0x1000) == Some([0x1000, 0x4000[)  // head trimmed
+    /// [0x0800, 0x0C00[.align(0x1000) == None                    // trimmed away
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// `None` when nothing survives: the range was empty to begin with, or the
+    /// skipped head is as long as the range itself. A returned range therefore
+    /// always has a non-zero length.
+    ///
+    /// # Panics
+    ///
+    /// If `alignment` is zero.
+    pub fn align(mut self, alignment: usize) -> Option<Self> {
+        let offset = self.base.addr() % alignment;
+        if offset == 0 {
+            if self.length == 0 {
+                return None;
+            }
+            return Some(self);
+        }
+
+        let offset = alignment - offset;
+
+        // SAFETY: the base moves forward by less than `alignment` and stays
+        // within the range it names, which the caller vouches for by having
+        // built the range in the first place. Nothing is dereferenced here.
+        self.base = unsafe { self.base.byte_add(offset) };
+        self.length = self.length.saturating_sub(offset);
+
+        if self.length == 0 {
+            return None;
+        }
+
+        Some(self)
+    }
+}
+
+impl<T> Range<PhysicalAddress<T>, usize> {
+    /// Moves the base up to the next multiple of `alignment`, returning what
+    /// is left of the range.
+    ///
+    /// Only the *base* is aligned. The length shrinks by however many bytes
+    /// were skipped and is not rounded down afterwards, so the result is the
+    /// largest sub-range of `self` that starts on an `alignment` boundary —
+    /// which is what a consumer that can only take aligned physical addresses,
+    /// such as a page frame allocator, can actually use out of it.
+    ///
+    /// An already aligned range is returned unchanged.
+    ///
+    /// ```text
+    /// [0x1000, 0x4000[.align(0x1000) == Some([0x1000, 0x4000[)  // untouched
+    /// [0x0800, 0x4000[.align(0x1000) == Some([0x1000, 0x4000[)  // head trimmed
+    /// [0x0800, 0x0C00[.align(0x1000) == None                    // trimmed away
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// `None` when nothing survives: the range was empty to begin with, or the
+    /// skipped head is as long as the range itself. A returned range therefore
+    /// always has a non-zero length.
+    ///
+    /// # Panics
+    ///
+    /// If `alignment` is zero.
+    pub fn align(mut self, alignment: usize) -> Option<Self> {
+        let offset = self.base.addr() % alignment;
+        if offset == 0 {
+            if self.length == 0 {
+                return None;
+            }
+            return Some(self);
+        }
+
+        let offset = alignment - offset;
+
+        // SAFETY: the base moves forward by less than `alignment` and stays
+        // within the range it names, which the caller vouches for by having
+        // built the range in the first place. Nothing is dereferenced here.
+        self.base = unsafe { self.base.byte_add(offset) };
+        self.length = self.length.saturating_sub(offset);
+
+        if self.length == 0 {
+            return None;
+        }
+
+        Some(self)
     }
 }
 
@@ -634,6 +739,7 @@ mod tests {
         kernel::locking::{EpilogueLevel, MemoryManagementLevelID, RootToken},
         utils::testing::HeapAllocator,
     };
+    use core::ffi::c_void;
 
     use super::*;
 
@@ -1317,5 +1423,104 @@ mod tests {
         token = t.0.clear(token);
         drop(t);
         level.leave(token);
+    }
+
+    // -----------------------------------------------------------------------=-
+    // align
+    // -----------------------------------------------------------------------=-
+
+    type PR = Range<PhysicalAddress<c_void>, usize>;
+    type VR = Range<VirtualAddress<c_void>, usize>;
+
+    fn pr(base: usize, length: usize) -> PR {
+        PR::new(PhysicalAddress::new(base as *mut c_void), length)
+    }
+
+    fn vr(base: usize, length: usize) -> VR {
+        VR::new(VirtualAddress::new(base as *mut c_void), length)
+    }
+
+    /// An already aligned, non-empty range comes back untouched.
+    #[test]
+    fn align_leaves_an_aligned_range_alone() {
+        assert_eq!(pr(0x1000, 0x3000).align(0x1000), Some(pr(0x1000, 0x3000)));
+        assert_eq!(vr(0x1000, 0x3000).align(0x1000), Some(vr(0x1000, 0x3000)));
+    }
+
+    /// The base moves up to the next multiple and the length pays for it, so
+    /// the end of the range does not move.
+    #[test]
+    fn align_trims_the_head_and_keeps_the_end() {
+        let aligned = pr(0x0800, 0x3800).align(0x1000).unwrap();
+
+        assert_eq!(aligned.base().addr(), 0x1000);
+        assert_eq!(aligned.length(), 0x3000);
+        assert_eq!(aligned.end().addr(), 0x4000);
+
+        let aligned = vr(0x0800, 0x3800).align(0x1000).unwrap();
+
+        assert_eq!(aligned.base().addr(), 0x1000);
+        assert_eq!(aligned.length(), 0x3000);
+        assert_eq!(aligned.end().addr(), 0x4000);
+    }
+
+    /// A single byte past the boundary still leaves a usable range.
+    #[test]
+    fn align_keeps_whatever_survives_the_trim() {
+        assert_eq!(pr(0x0FFF, 0x1001).align(0x1000), Some(pr(0x1000, 0x1000)));
+        assert_eq!(pr(0x0FFF, 0x0002).align(0x1000), Some(pr(0x1000, 0x0001)));
+    }
+
+    /// An empty range has nothing to align, aligned base or not.
+    #[test]
+    fn align_of_an_empty_range_is_none() {
+        assert_eq!(pr(0x1000, 0).align(0x1000), None);
+        assert_eq!(pr(0x0800, 0).align(0x1000), None);
+        assert_eq!(vr(0x1000, 0).align(0x1000), None);
+    }
+
+    /// A range too short to reach the next boundary is trimmed away entirely,
+    /// both when it stops short of it and when it ends exactly on it.
+    #[test]
+    fn align_of_a_range_shorter_than_the_trim_is_none() {
+        assert_eq!(pr(0x0800, 0x0400).align(0x1000), None);
+        assert_eq!(pr(0x0800, 0x0800).align(0x1000), None);
+        assert_eq!(vr(0x0800, 0x0400).align(0x1000), None);
+        assert_eq!(vr(0x0800, 0x0800).align(0x1000), None);
+    }
+
+    /// Every address is a multiple of one, so aligning to it is a no-op.
+    #[test]
+    fn align_to_one_changes_nothing() {
+        assert_eq!(pr(0x0801, 0x17).align(1), Some(pr(0x0801, 0x17)));
+        assert_eq!(vr(0x0801, 0x17).align(1), Some(vr(0x0801, 0x17)));
+    }
+
+    /// The base is aligned, the length is not rounded down to match: a range
+    /// of two and a half pages keeps its half page.
+    #[test]
+    fn align_does_not_round_the_length_down() {
+        let aligned = pr(0x0800, 0x2800).align(0x1000).unwrap();
+
+        assert_eq!(aligned.base().addr(), 0x1000);
+        assert_eq!(aligned.length(), 0x2000);
+
+        let aligned = pr(0x1000, 0x2800).align(0x1000).unwrap();
+
+        assert_eq!(aligned.base().addr(), 0x1000);
+        assert_eq!(aligned.length(), 0x2800);
+    }
+
+    /// Alignment beyond the page sizes works the same way — nothing here knows
+    /// about pages.
+    #[test]
+    fn align_works_for_any_power_of_two() {
+        let gigantic = 1usize << 30;
+
+        assert_eq!(
+            pr(gigantic - 1, gigantic + 1).align(gigantic),
+            Some(pr(gigantic, gigantic))
+        );
+        assert_eq!(pr(gigantic - 1, 1).align(gigantic), None);
     }
 }

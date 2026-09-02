@@ -7,7 +7,7 @@ use bitfield_struct::bitfield;
 use crate::{
     arch::generic::paging::{
         AccessRights, Error as PagingError, PageFrameAllocator, PageSize, Paging as _,
-        PhysicalAddress, PrivilegeLevel, VirtualAddress,
+        PhysicalAddress, PrivilegeLevel, ReversePaging, VirtualAddress,
     },
     kernel::{
         bootinfo::Bootinfo,
@@ -35,6 +35,21 @@ pub const HUGE_PAGE_SIZE: usize = ENTRIES_PER_TABLE * REGULAR_PAGE_SIZE;
 
 /// Gigantic page size (1 GiB).
 pub const GIGANTIC_PAGE_SIZE: usize = ENTRIES_PER_TABLE * ENTRIES_PER_TABLE * REGULAR_PAGE_SIZE;
+
+/// First virtual address of the direct map of all physical memory.
+///
+/// Physical address `p` appears at `PHYSICAL_MEMORY_MAP_START + p`, which is
+/// what [`ReversePaging`] translates with. See
+/// [`kernel_mapping`](Paging::kernel_mapping) for where this sits in the
+/// address space.
+pub const PHYSICAL_MEMORY_MAP_START: usize = 0xFFFF_C000_0000_0000;
+
+/// Extent of the direct map of all physical memory (64 TiB).
+///
+/// The upper half of the 128 TiB kernel half of the address space; the lower
+/// half of it holds the kernel image. Physical memory beyond this is not
+/// reachable through the map and so not usable.
+pub const PHYSICAL_MEMORY_MAP_SIZE: usize = 64 * 1024 * 1024 * 1024 * 1024;
 
 /// Number of entries per page table.
 const ENTRIES_PER_TABLE: usize = 512;
@@ -1394,9 +1409,9 @@ impl<PFA: PageFrameAllocator> Paging<PFA> {
         // Create physical memory map
         let token = match try_map(
             &mut page_tables,
-            VirtualAddress::new(0xFFFF_C000_0000_0000u64 as _),
+            VirtualAddress::new(PHYSICAL_MEMORY_MAP_START as _),
             PhysicalAddress::new(0x0000_0000_0000_0000u64 as _),
-            64usize * 1024 * 1024 * 1024 * 1024,
+            PHYSICAL_MEMORY_MAP_SIZE,
             AccessRights::custom(true, true, false),
             token,
         ) {
@@ -1513,7 +1528,10 @@ impl<PFA: PageFrameAllocator> Paging<PFA> {
             }
         };
 
-        page_tables.page_table_shift = 0xFFFF_C000_0000_0000;
+        // From here on the tables reach their own frames through the direct
+        // map just mapped, rather than through the offset the bootloader set
+        // up, which goes away with the bootloader's tables.
+        page_tables.page_table_shift = PHYSICAL_MEMORY_MAP_START;
         Ok((page_tables, token))
     }
 
@@ -1585,7 +1603,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
 
     /// Destroys the page tables and frees all associated page table frames.
     ///
-    /// This must be called instead of letting [`PageTables`] drop, since
+    /// This must be called instead of letting [`Paging`] drop, since
     /// dropping without freeing the frames would leak memory. The method
     /// consumes `self` and returns the lock token once cleanup is complete.
     ///
@@ -2378,6 +2396,43 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
     const HUGE_PAGE_SIZE: Option<usize> = Some(HUGE_PAGE_SIZE);
 
     const GIGANTIC_PAGE_SIZE: Option<usize> = Some(GIGANTIC_PAGE_SIZE);
+
+    const REGULAR_PAGE_SHIFT: usize = self::REGULAR_PAGE_SHIFT;
+
+    const HUGE_PAGE_SHIFT: Option<usize> = Some(self::HUGE_PAGE_SHIFT);
+
+    const GIGANTIC_PAGE_SHIFT: Option<usize> = Some(self::GIGANTIC_PAGE_SHIFT);
+}
+
+/// Translation through the direct map at [`PHYSICAL_MEMORY_MAP_START`], which
+/// [`kernel_mapping`](Paging::kernel_mapping) puts in place.
+///
+/// Independent of `PFA`: the window is a property of the address space layout,
+/// not of who hands out the frames behind it.
+///
+/// The map runs from [`PHYSICAL_MEMORY_MAP_START`] to the very top of the
+/// address space, which is why [`virt_to_phys`](ReversePaging::virt_to_phys)
+/// checks only the lower bound: there is no virtual address above the map.
+/// [`phys_to_virt`](ReversePaging::phys_to_virt) does have something to check,
+/// since physical memory can reach past the 64 TiB the map covers.
+impl<PFA: PageFrameAllocator> ReversePaging<PFA> for Paging<PFA> {
+    unsafe fn phys_to_virt<T>(phys_addr: PhysicalAddress<T>) -> VirtualAddress<T> {
+        assert!(
+            phys_addr.addr() < PHYSICAL_MEMORY_MAP_SIZE,
+            "{phys_addr:p} lies beyond the physical memory map"
+        );
+
+        VirtualAddress::new((phys_addr.addr() + PHYSICAL_MEMORY_MAP_START) as _)
+    }
+
+    unsafe fn virt_to_phys<T>(virt_addr: VirtualAddress<T>) -> PhysicalAddress<T> {
+        assert!(
+            virt_addr.addr() >= PHYSICAL_MEMORY_MAP_START,
+            "{virt_addr:p} lies outside the physical memory map"
+        );
+
+        PhysicalAddress::new((virt_addr.addr() - PHYSICAL_MEMORY_MAP_START) as _)
+    }
 }
 
 impl<PFA: PageFrameAllocator> Drop for Paging<PFA> {
@@ -3576,5 +3631,106 @@ mod test {
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
         syscall_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    // --- ReversePaging: the direct map of physical memory -------------------
+
+    /// Shorthand for the trait under test, bound to the test allocator.
+    type Reverse = Paging<TestPageFrameAllocator>;
+
+    fn phys_to_virt(phys_addr: usize) -> usize {
+        // SAFETY: nothing is dereferenced; only the arithmetic is under test.
+        unsafe {
+            <Reverse as ReversePaging<_>>::phys_to_virt(PhysicalAddress::<c_void>::new(
+                phys_addr as _,
+            ))
+        }
+        .addr()
+    }
+
+    fn virt_to_phys(virt_addr: usize) -> usize {
+        // SAFETY: as above.
+        unsafe {
+            <Reverse as ReversePaging<_>>::virt_to_phys(VirtualAddress::<c_void>::new(
+                virt_addr as _,
+            ))
+        }
+        .addr()
+    }
+
+    /// Physical zero is the first byte of the map, which is what makes the
+    /// translation a plain addition of the base.
+    #[test]
+    fn the_map_starts_at_physical_zero() {
+        assert_eq!(phys_to_virt(0), PHYSICAL_MEMORY_MAP_START);
+        assert_eq!(virt_to_phys(PHYSICAL_MEMORY_MAP_START), 0);
+    }
+
+    /// Every physical address appears at a fixed offset, whatever its size.
+    #[test]
+    fn the_map_is_a_fixed_offset() {
+        for phys_addr in [
+            REGULAR_PAGE_SIZE,
+            HUGE_PAGE_SIZE,
+            GIGANTIC_PAGE_SIZE,
+            0x1234_5678,
+            PHYSICAL_MEMORY_MAP_SIZE - 1,
+        ] {
+            assert_eq!(
+                phys_to_virt(phys_addr),
+                PHYSICAL_MEMORY_MAP_START + phys_addr
+            );
+        }
+    }
+
+    /// The two directions undo one another, which is the whole contract.
+    #[test]
+    fn translation_round_trips_both_ways() {
+        for phys_addr in [
+            0,
+            1,
+            REGULAR_PAGE_SIZE,
+            HUGE_PAGE_SIZE,
+            GIGANTIC_PAGE_SIZE,
+            PHYSICAL_MEMORY_MAP_SIZE - 1,
+        ] {
+            assert_eq!(virt_to_phys(phys_to_virt(phys_addr)), phys_addr);
+        }
+    }
+
+    /// The map covers 64 TiB, so its last byte translates and the one after
+    /// does not — the boundary the kernel's usable memory ends at.
+    #[test]
+    fn the_last_byte_of_the_map_translates() {
+        let last = PHYSICAL_MEMORY_MAP_SIZE - 1;
+
+        assert_eq!(phys_to_virt(last), PHYSICAL_MEMORY_MAP_START + last);
+    }
+
+    #[test]
+    #[should_panic(expected = "lies beyond the physical memory map")]
+    fn physical_memory_beyond_the_map_is_unreachable() {
+        phys_to_virt(PHYSICAL_MEMORY_MAP_SIZE);
+    }
+
+    #[test]
+    #[should_panic(expected = "lies outside the physical memory map")]
+    fn a_virtual_address_below_the_map_has_no_physical_one() {
+        virt_to_phys(PHYSICAL_MEMORY_MAP_START - 1);
+    }
+
+    /// The map is the upper half of the kernel half of the address space; the
+    /// lower half of it holds the kernel image.
+    #[test]
+    fn the_map_sits_where_the_kernel_mapping_puts_it() {
+        assert_eq!(PHYSICAL_MEMORY_MAP_START, 0xFFFF_C000_0000_0000);
+        assert_eq!(PHYSICAL_MEMORY_MAP_SIZE, 64 * 1024 * 1024 * 1024 * 1024);
+
+        // It ends at the very top of the address space: the last byte of the
+        // map is the last byte there is.
+        assert_eq!(
+            PHYSICAL_MEMORY_MAP_START + (PHYSICAL_MEMORY_MAP_SIZE - 1),
+            usize::MAX
+        );
     }
 }

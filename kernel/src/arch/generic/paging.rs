@@ -154,20 +154,17 @@ impl AccessRights {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```text
     /// let rights = AccessRights::new(&[AccessRight::Readable, AccessRight::Executable]);
     /// assert!(rights.is_readable());
     /// assert!(!rights.is_writable());
-    /// assert!(rights.executable());
+    /// assert!(rights.is_executable());
     /// ```
     pub const fn new(access_rights: &[AccessRight]) -> Self {
         let mut result = Self(0);
 
         let mut i = 0;
-        loop {
-            if i > access_rights.len() {
-                break;
-            }
+        while i < access_rights.len() {
             result.0 |= 1 << access_rights[i] as u8;
             i += 1;
         }
@@ -402,11 +399,31 @@ pub trait PageFrameAllocator {
 /// safety globally: a bad mapping can corrupt kernel or user memory, cause
 /// undefined behaviour on the next memory access, or crash the system.
 pub trait Paging<PFA: PageFrameAllocator> {
+    /// Size of a [`Regular`](PageSize::Regular) page in bytes.
     const REGULAR_PAGE_SIZE: usize;
 
+    /// Size of a [`Huge`](PageSize::Huge) page in bytes, or `None` if the
+    /// architecture has no such page size.
     const HUGE_PAGE_SIZE: Option<usize>;
 
+    /// Size of a [`Gigantic`](PageSize::Gigantic) page in bytes, or `None` if
+    /// the architecture has no such page size.
     const GIGANTIC_PAGE_SIZE: Option<usize>;
+
+    /// Base-two logarithm of [`REGULAR_PAGE_SIZE`](Self::REGULAR_PAGE_SIZE).
+    ///
+    /// The width of a regular page's offset field, which is what a
+    /// power-of-two allocator is parameterized by rather than the size itself.
+    const REGULAR_PAGE_SHIFT: usize;
+
+    /// Base-two logarithm of [`HUGE_PAGE_SIZE`](Self::HUGE_PAGE_SIZE), `None`
+    /// exactly when that one is.
+    const HUGE_PAGE_SHIFT: Option<usize>;
+
+    /// Base-two logarithm of
+    /// [`GIGANTIC_PAGE_SIZE`](Self::GIGANTIC_PAGE_SIZE), `None` exactly when
+    /// that one is.
+    const GIGANTIC_PAGE_SHIFT: Option<usize>;
 
     /// Gets the actual page size for [`PageSize`].
     ///
@@ -530,4 +547,154 @@ pub trait Paging<PFA: PageFrameAllocator> {
     /// - Activating an incomplete or malformed page table will immediately
     ///   cause a fault or silent memory corruption.
     unsafe fn activate(&self);
+}
+
+/// Translation both ways through an architecture's direct map of physical
+/// memory.
+///
+/// [`Paging`] maps a virtual address to a physical one by walking page tables,
+/// which needs the tables themselves to be reachable. The kernel solves that
+/// the usual way, with a window in which all of physical memory appears at a
+/// fixed offset, and this trait is that window: translation by arithmetic
+/// alone, no page walk and no lock.
+///
+/// The trade is that it only covers addresses *in* the window. Nothing here
+/// says whether a page is mapped, what rights it carries, or which address
+/// space it belongs to — for that, go through [`Paging`].
+///
+/// Implemented per architecture because both the window's base and its extent
+/// are part of the address space layout the architecture's page tables are
+/// built with; see `arch::x86_64::paging::Paging::kernel_mapping` for that
+/// layout on x86_64.
+pub trait ReversePaging<PFA: PageFrameAllocator> {
+    /// Physical address of the byte that `virt_addr` names in the direct map.
+    ///
+    /// # Panics
+    ///
+    /// If `virt_addr` lies outside the direct map.
+    ///
+    /// # Safety
+    ///
+    /// The result describes a location on the physical memory bus, so it is
+    /// only meaningful for as long as the memory behind `virt_addr` is not
+    /// handed to someone else. The caller must own that memory, or otherwise
+    /// know it stays put.
+    unsafe fn virt_to_phys<T>(virt_addr: VirtualAddress<T>) -> PhysicalAddress<T>;
+
+    /// Virtual address at which `phys_addr` appears in the direct map.
+    ///
+    /// # Panics
+    ///
+    /// If `phys_addr` lies beyond the physical memory the direct map covers.
+    ///
+    /// # Safety
+    ///
+    /// The result is only dereferenceable while page tables carrying the
+    /// direct map are active — the kernel's own, as built by
+    /// `Paging::kernel_mapping`. Called on any others, or before they go live,
+    /// it hands back a dangling pointer.
+    ///
+    /// The direct map spans all of physical memory, not just its usable parts,
+    /// so a translated address being inside it says nothing about there being
+    /// RAM behind it.
+    unsafe fn phys_to_virt<T>(phys_addr: PhysicalAddress<T>) -> VirtualAddress<T>;
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    extern crate std;
+
+    /// A bitmask union of the rights given, and nothing else — the empty slice
+    /// included.
+    #[test]
+    fn rights_are_the_union_of_what_is_asked_for() {
+        let rights = AccessRights::new(&[AccessRight::Readable, AccessRight::Executable]);
+
+        assert!(rights.is_readable());
+        assert!(!rights.is_writable());
+        assert!(rights.is_executable());
+
+        assert_eq!(AccessRights::new(&[]), AccessRights::none());
+    }
+
+    /// Duplicates are ignored: setting a bit twice is setting it once.
+    #[test]
+    fn duplicate_rights_are_ignored() {
+        let once = AccessRights::new(&[AccessRight::Writable]);
+        let twice = AccessRights::new(&[AccessRight::Writable, AccessRight::Writable]);
+
+        assert_eq!(once, twice);
+    }
+
+    /// Every right named individually is the same as [`AccessRights::full`].
+    #[test]
+    fn naming_every_right_is_full() {
+        let rights = AccessRights::new(&[
+            AccessRight::Readable,
+            AccessRight::Writable,
+            AccessRight::Executable,
+        ]);
+
+        assert_eq!(rights, AccessRights::full());
+    }
+
+    #[test]
+    fn none_has_nothing_and_full_has_everything() {
+        let none = AccessRights::none();
+
+        assert!(!none.is_readable());
+        assert!(!none.is_writable());
+        assert!(!none.is_executable());
+
+        let full = AccessRights::full();
+
+        assert!(full.is_readable());
+        assert!(full.is_writable());
+        assert!(full.is_executable());
+    }
+
+    #[test]
+    fn custom_sets_exactly_the_rights_it_is_given() {
+        assert_eq!(
+            AccessRights::custom(false, false, false),
+            AccessRights::none()
+        );
+        assert_eq!(AccessRights::custom(true, true, true), AccessRights::full());
+
+        let rw = AccessRights::custom(true, true, false);
+
+        assert!(rw.is_readable());
+        assert!(rw.is_writable());
+        assert!(!rw.is_executable());
+    }
+
+    /// The setters clear as well as set, so a right can be taken back.
+    #[test]
+    fn a_right_can_be_set_and_cleared_again() {
+        let mut rights = AccessRights::none();
+
+        rights.set_writable(true);
+        assert!(rights.is_writable());
+
+        rights.set_writable(false);
+        assert!(!rights.is_writable());
+        assert_eq!(rights, AccessRights::none());
+    }
+
+    /// Formatted Unix-style, which is what the paging code prints.
+    #[test]
+    fn rights_format_as_a_permission_string() {
+        assert_eq!(std::format!("{}", AccessRights::none()), "[---]");
+        assert_eq!(std::format!("{}", AccessRights::full()), "[rwx]");
+        assert_eq!(
+            std::format!("{}", AccessRights::custom(true, false, true)),
+            "[r-x]"
+        );
+        assert_eq!(
+            std::format!("{}", AccessRights::custom(false, true, false)),
+            "[-w-]"
+        );
+    }
 }
