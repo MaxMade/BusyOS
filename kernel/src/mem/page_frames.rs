@@ -14,7 +14,7 @@
 //! whichever is in charge at the time.
 //!
 //! The changeover is two calls, in this order, once the kernel's own page
-//! tables are active: [`init_for_bootinfo`](PageFrames::init_for_bootinfo)
+//! tables are active: [`init_from_bootinfo`](PageFrames::init_from_bootinfo)
 //! hands the usable physical memory to the buddy allocators, and
 //! [`handover_from_early`](PageFrames::handover_from_early) then drains what
 //! [`EarlyPageFrames`] never got round to handing out into them as well.
@@ -624,13 +624,36 @@ pub struct PhysicalPageFrames {
     num: usize,
 }
 
+impl PhysicalPageFrames {
+    /// Physical address of the first frame, aligned to at least
+    /// [`page_size`](Self::page_size).
+    pub const fn start(&self) -> PhysicalAddress<c_void> {
+        self.start
+    }
+
+    /// Number of frames of [`page_size`](Self::page_size) the range holds.
+    pub const fn num_frames(&self) -> usize {
+        self.num
+    }
+
+    /// Page size the frames were allocated for.
+    pub const fn page_size(&self) -> PageSize {
+        self.size
+    }
+}
+
 /// The kernel's page frames.
 ///
 /// A [`Ticketlock`] rather than a [`Spinlock`]: it serves waiters in the order
 /// they arrived, so a core cannot be starved out of physical memory by others
 /// that keep winning the race. Every allocator above this one bottoms out
 /// here, which is what makes that worth paying for.
-static PAGE_FRAMES: MemoryTicketlock<PageFrames> =
+///
+/// Public because the allocators above it reach it directly rather than
+/// through [`PageFrameAllocator`], which only ever hands out single regular
+/// frames: the [`Heap`](crate::mem::heap::Heap) grows by whole pages of
+/// whatever size fits.
+pub static PAGE_FRAMES: MemoryTicketlock<PageFrames> =
     MemoryTicketlock::new(Ticketlock::new(), PageFrames::new());
 
 impl PageFrameAllocator for PageFrames {
@@ -825,5 +848,23 @@ mod test {
 
         assert_eq!(pages, range(4096, 4096));
         assert_eq!(rest.length(), 0);
+    }
+
+    // --- PhysicalPageFrames ------------------------------------------------
+
+    /// The accessors report the address, size and count the allocation
+    /// recorded — the triple that names the block to free again, and all a
+    /// caller has to go on.
+    #[test]
+    fn page_frames_report_what_they_were_allocated_as() {
+        let page_frames = PhysicalPageFrames {
+            start: PhysicalAddress::new(HUGE_PAGE_SIZE as *mut c_void),
+            size: PageSize::Huge,
+            num: 3,
+        };
+
+        assert_eq!(page_frames.start().addr(), HUGE_PAGE_SIZE);
+        assert_eq!(page_frames.page_size(), PageSize::Huge);
+        assert_eq!(page_frames.num_frames(), 3);
     }
 }
