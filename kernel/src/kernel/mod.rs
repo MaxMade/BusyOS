@@ -8,3 +8,4 @@ pub mod locking;
 pub mod prologue_lock;
 pub mod spinlock;
 pub mod ticketlock;
+pub mod linked_list;
