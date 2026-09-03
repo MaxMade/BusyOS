@@ -1,6 +1,7 @@
 #[cfg(all(not(test), not(feature = "library")))]
 pub mod panic;
 
+pub mod arc;
 pub mod bootinfo;
 pub mod core_local;
 pub mod locking;
