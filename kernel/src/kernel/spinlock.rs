@@ -8,6 +8,9 @@ use kernel_derive::lock_id;
 use crate::kernel::locking::{HierarchicalLock, Lock, LockId, level};
 use crate::kernel::prologue_lock::PrologueLock;
 
+#[lock_id(Driver)]
+pub struct SpinlockDriverID;
+
 #[lock_id(MemoryManagement)]
 pub struct SpinlockMemoryManagementID;
 
@@ -57,12 +60,23 @@ impl<Id: LockId> HierarchicalLock for Spinlock<Id> {
     }
 }
 
+/// Driver-level spinlock.
+///
+/// TODO(@MaxMade): a lock at [`level::Driver`] is meant to be a blocking
+/// lock — a driver sleeps while it waits for its device — and none exists
+/// yet, so this spinning one stands in. Until it is replaced, a hold must
+/// not sleep: every waiter spins for as long as it does.
+pub type DriverSpinlock<T> = Lock<T, Spinlock<SpinlockDriverID>>;
+
 pub type MemoryManagementSpinlock<T> = Lock<T, Spinlock<SpinlockMemoryManagementID>>;
 
 pub type MemorySpinlock<T> = Lock<T, Spinlock<SpinlockMemoryID>>;
 
 /// Prologue-level spinlock. Masks interrupts for the duration of the hold.
 pub type PrologueSpinlock<T> = PrologueLock<T, Spinlock<SpinlockPrologueID>>;
+
+#[lock_id(Driver)]
+pub struct RWSpinlockDriverID;
 
 #[lock_id(MemoryManagement)]
 pub struct RWSpinlockMemoryManagementID;
@@ -136,6 +150,14 @@ impl<Id: LockId> HierarchicalLock for RWSpinlock<Id> {
     }
 }
 
+/// Driver-level reader-writer spinlock.
+///
+/// TODO(@MaxMade): a lock at [`level::Driver`] is meant to be a blocking
+/// lock — a driver sleeps while it waits for its device — and none exists
+/// yet, so this spinning one stands in. Until it is replaced, a hold must
+/// not sleep: every waiter spins for as long as it does.
+pub type DriverRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockDriverID>>;
+
 pub type MemoryManagementRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockMemoryManagementID>>;
 
 pub type MemoryRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockMemoryID>>;
@@ -152,7 +174,7 @@ mod test {
     };
 
     use crate::kernel::locking::{
-        CanAcquire, EpilogueLevel, PreviousToken, RootToken, SyscallLevel,
+        CanAcquire, DriverLevel, EpilogueLevel, PreviousToken, RootToken, SyscallLevel,
     };
 
     use super::*;
@@ -346,5 +368,47 @@ mod test {
 
         let mut counter = Arc::into_inner(counter).unwrap();
         assert!(*counter.get_mut() == NUM_EXCLUSIVE * ITERATIONS);
+    }
+
+    /// The `Driver` level sits between `Epilogue` and `MemoryManagement`: an
+    /// epilogue may take a driver lock, and a driver lock may be held while
+    /// descending to the memory levels below.
+    #[test]
+    fn usage_driver_level() {
+        let root_token = unsafe { RootToken::forge() };
+
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
+
+        let driver = DriverSpinlock::new(Spinlock::new(), 0);
+        let memory_management = MemoryManagementSpinlock::new(Spinlock::new(), 0);
+
+        let (driver_guard, token) = driver.acquire(token);
+        let (memory_management_guard, token) = memory_management.acquire(token);
+
+        let token = memory_management_guard.release(token);
+        let token = driver_guard.release(token);
+
+        epilogue_level.leave(token);
+    }
+
+    /// A context entering at the `Driver` level holds it, so it reaches
+    /// everything below — the levels a driver actually works on — and, as with
+    /// every other level, not its own.
+    #[test]
+    fn usage_driver_entry_level() {
+        let root_token = unsafe { RootToken::forge() };
+
+        let (driver_level, token) = DriverLevel::enter(root_token);
+
+        let memory_management = MemoryManagementRWSpinlock::new(RWSpinlock::new(), 0);
+        let memory = MemorySpinlock::new(Spinlock::new(), 0);
+
+        let (memory_management_guard, token) = memory_management.acquire_shared(token);
+        let (memory_guard, token) = memory.acquire(token);
+
+        let token = memory_guard.release(token);
+        let token = memory_management_guard.release(token);
+
+        driver_level.leave(token);
     }
 }

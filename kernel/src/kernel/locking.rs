@@ -12,6 +12,19 @@ pub enum Level {
     Syscall,
     // Top half of interrupt handling.
     Epilogue,
+    // Device drivers, e.g. a driver's own state or the device it talks to.
+    //
+    // Below `Epilogue`, so the top half of an interrupt may take a driver's
+    // lock to hand a completed transfer over, and above `Scheduler`, so a
+    // driver may sleep while it holds one — waiting for a device is the
+    // ordinary case. Per the note below, that makes a lock at this level a
+    // blocking one.
+    //
+    // TODO(@MaxMade): no blocking lock exists yet, so the `Driver` locks in
+    // `spinlock` and `ticketlock` stand in for one. Until they are replaced, a
+    // hold at this level must not sleep after all: every waiter spins for as
+    // long as it does.
+    Driver,
     // The scheduler's own lock, and the boundary between blocking and
     // spinning locks.
     //
@@ -107,6 +120,31 @@ impl Drop for EpilogueLevel {
         panic!(
             "Epilogue level must never be left implicitly! Use EpilogueLevel::leave(...) instead!"
         );
+    }
+}
+
+#[lock_id(Driver)]
+pub struct DriverLevelID;
+
+pub struct DriverLevel;
+
+impl DriverLevel {
+    pub fn enter(root_token: RootToken) -> (Self, Token<DriverLevelID, RootToken, Shared>) {
+        core::mem::forget(root_token);
+
+        let token = unsafe { Token::forge() };
+        (Self, token)
+    }
+
+    pub fn leave(self, token: Token<DriverLevelID, RootToken, Shared>) {
+        core::mem::forget(self);
+        core::mem::forget(token);
+    }
+}
+
+impl Drop for DriverLevel {
+    fn drop(&mut self) {
+        panic!("Driver level must never be left implicitly! Use DriverLevel::leave(...) instead!");
     }
 }
 

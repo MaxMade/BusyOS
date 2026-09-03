@@ -8,6 +8,9 @@ use kernel_derive::lock_id;
 use crate::kernel::locking::{HierarchicalLock, Lock, LockId, level};
 use crate::kernel::prologue_lock::PrologueLock;
 
+#[lock_id(Driver)]
+pub struct TicketlockDriverID;
+
 #[lock_id(MemoryManagement)]
 pub struct TicketlockMemoryManagementID;
 
@@ -60,12 +63,23 @@ impl<Id: LockId> HierarchicalLock for Ticketlock<Id> {
     }
 }
 
+/// Driver-level ticketlock.
+///
+/// TODO(@MaxMade): a lock at [`level::Driver`] is meant to be a blocking
+/// lock — a driver sleeps while it waits for its device — and none exists
+/// yet, so this spinning one stands in. Until it is replaced, a hold must
+/// not sleep: every waiter spins for as long as it does.
+pub type DriverTicketlock<T> = Lock<T, Ticketlock<TicketlockDriverID>>;
+
 pub type MemoryManagementTicketlock<T> = Lock<T, Ticketlock<TicketlockMemoryManagementID>>;
 
 pub type MemoryTicketlock<T> = Lock<T, Ticketlock<TicketlockMemoryID>>;
 
 /// Prologue-level ticketlock. Masks interrupts for the duration of the hold.
 pub type PrologueTicketlock<T> = PrologueLock<T, Ticketlock<TicketlockPrologueID>>;
+
+#[lock_id(Driver)]
+pub struct RWTicketlockDriverID;
 
 #[lock_id(MemoryManagement)]
 pub struct RWTicketlockMemoryManagementID;
@@ -172,6 +186,14 @@ impl<Id: LockId> HierarchicalLock for RWTicketlock<Id> {
         self.state.fetch_sub(1, AtomicOrdering::Release);
     }
 }
+
+/// Driver-level reader-writer ticketlock.
+///
+/// TODO(@MaxMade): a lock at [`level::Driver`] is meant to be a blocking
+/// lock — a driver sleeps while it waits for its device — and none exists
+/// yet, so this spinning one stands in. Until it is replaced, a hold must
+/// not sleep: every waiter spins for as long as it does.
+pub type DriverRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockDriverID>>;
 
 pub type MemoryManagementRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockMemoryManagementID>>;
 
@@ -383,5 +405,25 @@ mod test {
 
         let mut counter = Arc::into_inner(counter).unwrap();
         assert!(*counter.get_mut() == NUM_EXCLUSIVE * ITERATIONS);
+    }
+
+    /// The `Driver` level sits between `Epilogue` and `MemoryManagement`, and
+    /// a ticketlock is available at it like at the levels below.
+    #[test]
+    fn usage_driver_level() {
+        let root_token = unsafe { RootToken::forge() };
+
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
+
+        let driver = DriverTicketlock::new(Ticketlock::new(), 0);
+        let memory_management = MemoryManagementRWTicketlock::new(RWTicketlock::new(), 0);
+
+        let (driver_guard, token) = driver.acquire(token);
+        let (memory_management_guard, token) = memory_management.acquire(token);
+
+        let token = memory_management_guard.release(token);
+        let token = driver_guard.release(token);
+
+        epilogue_level.leave(token);
     }
 }
