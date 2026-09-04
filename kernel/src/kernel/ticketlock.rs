@@ -11,6 +11,9 @@ use crate::kernel::prologue_lock::PrologueLock;
 #[lock_id(Driver)]
 pub struct TicketlockDriverID;
 
+#[lock_id(Thread)]
+pub struct TicketlockThreadID;
+
 #[lock_id(MemoryManagement)]
 pub struct TicketlockMemoryManagementID;
 
@@ -71,6 +74,13 @@ impl<Id: LockId> HierarchicalLock for Ticketlock<Id> {
 /// not sleep: every waiter spins for as long as it does.
 pub type DriverTicketlock<T> = Lock<T, Ticketlock<TicketlockDriverID>>;
 
+/// Thread-level ticketlock.
+///
+/// [`level::Thread`] is below the scheduler, so this is a spinning lock in
+/// earnest: a hold may not sleep, and the scheduler may take one while it
+/// holds its own lock.
+pub type ThreadTicketlock<T> = Lock<T, Ticketlock<TicketlockThreadID>>;
+
 pub type MemoryManagementTicketlock<T> = Lock<T, Ticketlock<TicketlockMemoryManagementID>>;
 
 pub type MemoryTicketlock<T> = Lock<T, Ticketlock<TicketlockMemoryID>>;
@@ -80,6 +90,9 @@ pub type PrologueTicketlock<T> = PrologueLock<T, Ticketlock<TicketlockPrologueID
 
 #[lock_id(Driver)]
 pub struct RWTicketlockDriverID;
+
+#[lock_id(Thread)]
+pub struct RWTicketlockThreadID;
 
 #[lock_id(MemoryManagement)]
 pub struct RWTicketlockMemoryManagementID;
@@ -195,6 +208,11 @@ impl<Id: LockId> HierarchicalLock for RWTicketlock<Id> {
 /// not sleep: every waiter spins for as long as it does.
 pub type DriverRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockDriverID>>;
 
+/// Thread-level reader-writer ticketlock.
+///
+/// As [`ThreadTicketlock`], a spinning lock: see [`level::Thread`].
+pub type ThreadRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockThreadID>>;
+
 pub type MemoryManagementRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockMemoryManagementID>>;
 
 pub type MemoryRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockMemoryID>>;
@@ -211,7 +229,7 @@ mod test {
     };
 
     use crate::kernel::locking::{
-        CanAcquire, EpilogueLevel, PreviousToken, RootToken, SyscallLevel,
+        CanAcquire, DriverLevel, EpilogueLevel, PreviousToken, RootToken, SyscallLevel,
     };
 
     use super::*;
@@ -425,5 +443,25 @@ mod test {
         let token = driver_guard.release(token);
 
         epilogue_level.leave(token);
+    }
+
+    /// The `Thread` level sits below the scheduler, and a ticketlock is
+    /// available at it like at the levels below.
+    #[test]
+    fn usage_thread_level() {
+        let root_token = unsafe { RootToken::forge() };
+
+        let (driver_level, token) = DriverLevel::enter(root_token);
+
+        let thread = ThreadTicketlock::new(Ticketlock::new(), 0);
+        let memory_management = MemoryManagementRWTicketlock::new(RWTicketlock::new(), 0);
+
+        let (thread_guard, token) = thread.acquire(token);
+        let (memory_management_guard, token) = memory_management.acquire(token);
+
+        let token = memory_management_guard.release(token);
+        let token = thread_guard.release(token);
+
+        driver_level.leave(token);
     }
 }

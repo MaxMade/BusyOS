@@ -34,6 +34,16 @@ pub enum Level {
     // level and everything below may not and is a spinning lock (Spinlock,
     // Ticketlock).
     Scheduler,
+    // Thread state, e.g. a thread's control block or the table they live in.
+    //
+    // Below `Scheduler`, so the scheduler may take a thread's lock while it
+    // holds its own — picking the next thread reads and writes the thread it
+    // picks — and above `MemoryManagement`, so a control block may be
+    // allocated or freed under one. Per the note above, a lock at this level
+    // is a spinning one: a hold may not sleep, which is what keeps a thread
+    // from being descheduled while holding the state its waker needs. Code
+    // that has to block therefore takes the scheduler's lock first.
+    Thread,
     // Memory Management, e.g. creating/removing page mappings or
     // allocating/freeing heap memory.
     MemoryManagement,
@@ -145,6 +155,31 @@ impl DriverLevel {
 impl Drop for DriverLevel {
     fn drop(&mut self) {
         panic!("Driver level must never be left implicitly! Use DriverLevel::leave(...) instead!");
+    }
+}
+
+#[lock_id(Thread)]
+pub struct ThreadLevelID;
+
+pub struct ThreadLevel;
+
+impl ThreadLevel {
+    pub fn enter(root_token: RootToken) -> (Self, Token<ThreadLevelID, RootToken, Shared>) {
+        core::mem::forget(root_token);
+
+        let token = unsafe { Token::forge() };
+        (Self, token)
+    }
+
+    pub fn leave(self, token: Token<ThreadLevelID, RootToken, Shared>) {
+        core::mem::forget(self);
+        core::mem::forget(token);
+    }
+}
+
+impl Drop for ThreadLevel {
+    fn drop(&mut self) {
+        panic!("Thread level must never be left implicitly! Use ThreadLevel::leave(...) instead!");
     }
 }
 

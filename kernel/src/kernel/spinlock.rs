@@ -11,6 +11,9 @@ use crate::kernel::prologue_lock::PrologueLock;
 #[lock_id(Driver)]
 pub struct SpinlockDriverID;
 
+#[lock_id(Thread)]
+pub struct SpinlockThreadID;
+
 #[lock_id(MemoryManagement)]
 pub struct SpinlockMemoryManagementID;
 
@@ -68,6 +71,13 @@ impl<Id: LockId> HierarchicalLock for Spinlock<Id> {
 /// not sleep: every waiter spins for as long as it does.
 pub type DriverSpinlock<T> = Lock<T, Spinlock<SpinlockDriverID>>;
 
+/// Thread-level spinlock.
+///
+/// [`level::Thread`] is below the scheduler, so this is a spinning lock in
+/// earnest: a hold may not sleep, and the scheduler may take one while it
+/// holds its own lock.
+pub type ThreadSpinlock<T> = Lock<T, Spinlock<SpinlockThreadID>>;
+
 pub type MemoryManagementSpinlock<T> = Lock<T, Spinlock<SpinlockMemoryManagementID>>;
 
 pub type MemorySpinlock<T> = Lock<T, Spinlock<SpinlockMemoryID>>;
@@ -77,6 +87,9 @@ pub type PrologueSpinlock<T> = PrologueLock<T, Spinlock<SpinlockPrologueID>>;
 
 #[lock_id(Driver)]
 pub struct RWSpinlockDriverID;
+
+#[lock_id(Thread)]
+pub struct RWSpinlockThreadID;
 
 #[lock_id(MemoryManagement)]
 pub struct RWSpinlockMemoryManagementID;
@@ -158,6 +171,11 @@ impl<Id: LockId> HierarchicalLock for RWSpinlock<Id> {
 /// not sleep: every waiter spins for as long as it does.
 pub type DriverRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockDriverID>>;
 
+/// Thread-level reader-writer spinlock.
+///
+/// As [`ThreadSpinlock`], a spinning lock: see [`level::Thread`].
+pub type ThreadRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockThreadID>>;
+
 pub type MemoryManagementRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockMemoryManagementID>>;
 
 pub type MemoryRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockMemoryID>>;
@@ -174,7 +192,7 @@ mod test {
     };
 
     use crate::kernel::locking::{
-        CanAcquire, DriverLevel, EpilogueLevel, PreviousToken, RootToken, SyscallLevel,
+        CanAcquire, DriverLevel, EpilogueLevel, PreviousToken, RootToken, SyscallLevel, ThreadLevel,
     };
 
     use super::*;
@@ -410,5 +428,47 @@ mod test {
         let token = memory_management_guard.release(token);
 
         driver_level.leave(token);
+    }
+
+    /// The `Thread` level sits below the scheduler: a driver — or anything
+    /// else above it — may take a thread lock, and a thread lock may be held
+    /// while descending to the memory levels below.
+    #[test]
+    fn usage_thread_level() {
+        let root_token = unsafe { RootToken::forge() };
+
+        let (driver_level, token) = DriverLevel::enter(root_token);
+
+        let thread = ThreadSpinlock::new(Spinlock::new(), 0);
+        let memory_management = MemoryManagementSpinlock::new(Spinlock::new(), 0);
+
+        let (thread_guard, token) = thread.acquire(token);
+        let (memory_management_guard, token) = memory_management.acquire(token);
+
+        let token = memory_management_guard.release(token);
+        let token = thread_guard.release(token);
+
+        driver_level.leave(token);
+    }
+
+    /// A context entering at the `Thread` level reaches the levels below it —
+    /// allocating a control block is the ordinary case — and, as with every
+    /// other level, not its own.
+    #[test]
+    fn usage_thread_entry_level() {
+        let root_token = unsafe { RootToken::forge() };
+
+        let (thread_level, token) = ThreadLevel::enter(root_token);
+
+        let memory_management = MemoryManagementRWSpinlock::new(RWSpinlock::new(), 0);
+        let memory = MemorySpinlock::new(Spinlock::new(), 0);
+
+        let (memory_management_guard, token) = memory_management.acquire_shared(token);
+        let (memory_guard, token) = memory.acquire(token);
+
+        let token = memory_guard.release(token);
+        let token = memory_management_guard.release(token);
+
+        thread_level.leave(token);
     }
 }
