@@ -9,7 +9,7 @@
 //! individual MSRs, allowing register contents to be represented as
 //! strongly-typed Rust structures instead of raw `u64` values.
 
-use core::fmt::Debug;
+use core::fmt::{Debug, Display};
 
 use bitfield_struct::bitfield;
 
@@ -148,6 +148,158 @@ pub struct EFER {
 }
 
 impl MSR<0xC0000080> for EFER {
+    fn raw(&self) -> u64 {
+        self.0
+    }
+
+    unsafe fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// A memory type, as encoded in an entry of the [`PAT`] register.
+///
+/// The numeric value of each variant is the encoding the hardware expects;
+/// the two encodings the architecture leaves undefined, `0x02` and `0x03`,
+/// have no variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MemoryType {
+    /// Uncacheable (`UC`) — every access reaches the bus, in program order.
+    Uncacheable = 0x00,
+
+    /// Write Combining (`WC`) — writes are gathered in a buffer and released
+    /// as bursts; reads are uncached.
+    WriteCombining = 0x01,
+
+    /// Write Through (`WT`) — reads are cached, writes update cache and
+    /// memory both.
+    WriteThrough = 0x04,
+
+    /// Write Protected (`WP`) — reads are cached, writes go to memory and
+    /// invalidate the line, in every cache holding it.
+    WriteProtected = 0x05,
+
+    /// Write Back (`WB`) — reads and writes are cached, writes reach memory
+    /// on eviction.
+    WriteBack = 0x06,
+
+    /// Uncached (`UC-`) — as [`Uncacheable`](MemoryType::Uncacheable), except
+    /// that an MTRR asking for write-combining wins over it.
+    UncachedMinus = 0x07,
+}
+
+impl Display for MemoryType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            MemoryType::Uncacheable => write!(f, "UC"),
+            MemoryType::WriteCombining => write!(f, "WC"),
+            MemoryType::WriteThrough => write!(f, "WT"),
+            MemoryType::WriteProtected => write!(f, "WP"),
+            MemoryType::WriteBack => write!(f, "WB"),
+            MemoryType::UncachedMinus => write!(f, "UC-"),
+        }
+    }
+}
+
+impl MemoryType {
+    /// The hardware encoding of this memory type.
+    pub const fn into_bits(self) -> u8 {
+        self as u8
+    }
+
+    /// The memory type `bits` encodes, or `None` for the two encodings the
+    /// architecture reserves.
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        match bits {
+            0x00 => Some(MemoryType::Uncacheable),
+            0x01 => Some(MemoryType::WriteCombining),
+            0x04 => Some(MemoryType::WriteThrough),
+            0x05 => Some(MemoryType::WriteProtected),
+            0x06 => Some(MemoryType::WriteBack),
+            0x07 => Some(MemoryType::UncachedMinus),
+            _ => None,
+        }
+    }
+}
+
+/// Page Attribute Table (`IA32_PAT`, MSR `0x277`).
+///
+/// Eight [`MemoryType`] slots, `PA0` through `PA7`, one per byte. A leaf page
+/// table entry does not name its memory type directly: its `PAT`, `PCD` and
+/// `PWT` bits form the three-bit index `PAT << 2 | PCD << 1 | PWT` of the slot
+/// that names it. Which mapping ends up with which memory type is therefore a
+/// property of this register, and the layout the kernel installs is
+/// [`PAT_LAYOUT`](crate::arch::x86_64::paging::PAT_LAYOUT).
+///
+/// The register is per core, and comes out of reset holding
+/// `WB`, `WT`, `UC-`, `UC`, `WB`, `WT`, `UC-`, `UC`.
+///
+/// # Safety
+///
+/// Availability must be checked via
+/// [`FeatureInformationEDX::pat`](crate::arch::x86_64::cpuid::FeatureInformationEDX::pat)
+/// before this MSR is touched.
+#[derive(Clone, Copy)]
+pub struct PAT(u64);
+
+impl Debug for PAT {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "PAT(0x{:016x})", self.0)
+    }
+}
+
+impl Display for PAT {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "0x{:016x} (", self.0)?;
+
+        for index in 0..PAT::ENTRIES {
+            if index != 0 {
+                write!(f, ", ")?;
+            }
+
+            match self.entry(index) {
+                Some(memory_type) => write!(f, "PA{index}: {memory_type}")?,
+                None => write!(f, "PA{index}: reserved")?,
+            }
+        }
+
+        write!(f, ")")
+    }
+}
+
+impl PAT {
+    /// Number of memory type slots in the register.
+    pub const ENTRIES: usize = 8;
+
+    /// Builds a register value from the memory type of each of its eight
+    /// slots, `PA0` first.
+    pub const fn from_entries(entries: [MemoryType; PAT::ENTRIES]) -> Self {
+        let mut value = 0u64;
+
+        let mut index = 0;
+        while index < PAT::ENTRIES {
+            value |= (entries[index].into_bits() as u64) << (index * 8);
+            index += 1;
+        }
+
+        Self(value)
+    }
+
+    /// The memory type held by slot `index`, or `None` if the slot holds one
+    /// of the reserved encodings.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is not below [`ENTRIES`](PAT::ENTRIES).
+    pub const fn entry(&self, index: usize) -> Option<MemoryType> {
+        assert!(index < PAT::ENTRIES, "PAT slot index out of range");
+
+        MemoryType::from_bits((self.0 >> (index * 8)) as u8 & 0b111)
+    }
+}
+
+impl MSR<0x277> for PAT {
     fn raw(&self) -> u64 {
         self.0
     }

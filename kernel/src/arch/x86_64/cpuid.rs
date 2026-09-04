@@ -63,6 +63,71 @@ where
     }
 }
 
+/// CPUID leaf `0x00000001` EDX — feature information.
+///
+/// Only the bits the kernel acts on are named; the rest are left unnamed
+/// rather than described, since nothing reads them.
+#[bitfield(u32)]
+pub struct FeatureInformationEDX {
+    /// Reserved (bits [15:0]).
+    #[bits(16)]
+    __: u16,
+
+    /// Page Attribute Table (`PAT`, bit 16).
+    ///
+    /// When set, the `IA32_PAT` MSR exists and the `PAT` bit of a leaf page
+    /// table entry selects one of its eight memory types. Must be checked
+    /// before [`PAT`](crate::arch::x86_64::msr::PAT) is read or written.
+    #[bits(1, access = RO)]
+    pub pat: bool,
+
+    /// Reserved (bits [31:17]).
+    #[bits(15)]
+    __: u16,
+}
+
+/// Typed result of CPUID leaf `0x00000001`.
+///
+/// Provides processor signature and feature information.
+///
+/// Note: EAX (processor signature), EBX (brand index, `CLFLUSH` size, local
+/// APIC id) and ECX are exposed as raw `u32` values since their sub-fields are
+/// not required for feature detection.
+pub struct FeatureInformation {
+    eax: u32,
+    ebx: u32,
+    ecx: u32,
+    /// Feature Information `edx` register.
+    pub edx: FeatureInformationEDX,
+}
+
+impl CPUID<0x00000001, 0x0> for FeatureInformation {
+    fn eax(&self) -> u32 {
+        self.eax
+    }
+
+    fn ebx(&self) -> u32 {
+        self.ebx
+    }
+
+    fn ecx(&self) -> u32 {
+        self.ecx
+    }
+
+    fn edx(&self) -> u32 {
+        self.edx.into_bits()
+    }
+
+    unsafe fn from_raw(eax: u32, ebx: u32, ecx: u32, edx: u32) -> Self {
+        Self {
+            eax,
+            ebx,
+            ecx,
+            edx: FeatureInformationEDX::from_bits(edx),
+        }
+    }
+}
+
 /// CPUID leaf `0x80000001` ECX — extended feature identifiers.
 ///
 /// Note: EAX (extended processor signature) and EBX (reserved on Intel,

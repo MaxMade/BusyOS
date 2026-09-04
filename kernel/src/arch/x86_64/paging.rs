@@ -5,9 +5,12 @@ use core::marker::PhantomData;
 use bitfield_struct::bitfield;
 
 use crate::{
-    arch::generic::paging::{
-        AccessRights, Error as PagingError, PageFrameAllocator, PageSize, Paging as _,
-        PhysicalAddress, PrivilegeLevel, ReversePaging, VirtualAddress,
+    arch::{
+        generic::paging::{
+            AccessRights, CachingMode, Error as PagingError, PageFrameAllocator, PageSize,
+            Paging as _, PhysicalAddress, PrivilegeLevel, ReversePaging, VirtualAddress,
+        },
+        x86_64::msr::{MSR, MemoryType, PAT},
     },
     kernel::{
         bootinfo::Bootinfo,
@@ -53,6 +56,108 @@ pub const PHYSICAL_MEMORY_MAP_SIZE: usize = 64 * 1024 * 1024 * 1024 * 1024;
 
 /// Number of entries per page table.
 const ENTRIES_PER_TABLE: usize = 512;
+
+/// The `IA32_PAT` layout every mapping this module makes is encoded against.
+///
+/// A leaf entry does not name its memory type: its `PAT`, `PCD` and `PWT`
+/// bits index this table, so a [`CachingMode`] is only worth what the slot it
+/// selects holds. [`install_pat`] puts this layout in place; until it has run
+/// on a core, that core reads the reset layout instead.
+///
+/// The first four slots *are* the reset layout, which is what makes the
+/// change safe to make on a running core: no mapping in existence — the
+/// bootloader's tables, the trampoline of
+/// [`temporary_upper_half`](Paging::temporary_upper_half), anything mapped
+/// before the switch — has its memory type changed under it, so none of the
+/// cache invalidation the SDM asks for when a live memory type changes is
+/// needed. `PA4` is the one slot that differs, and nothing selects it until a
+/// mapping asks for [`CachingMode::WriteCombined`].
+pub const PAT_LAYOUT: [MemoryType; PAT::ENTRIES] = [
+    // PA0: PAT=0, PCD=0, PWT=0
+    MemoryType::WriteBack,
+    // PA1: PAT=0, PCD=0, PWT=1
+    MemoryType::WriteThrough,
+    // PA2: PAT=0, PCD=1, PWT=0
+    MemoryType::UncachedMinus,
+    // PA3: PAT=0, PCD=1, PWT=1
+    MemoryType::Uncacheable,
+    // PA4: PAT=1, PCD=0, PWT=0 — the reset layout repeats itself from here,
+    // so this is the slot free for a type the reset layout does not offer.
+    MemoryType::WriteCombining,
+    // PA5: PAT=1, PCD=0, PWT=1
+    MemoryType::WriteThrough,
+    // PA6: PAT=1, PCD=1, PWT=0
+    MemoryType::UncachedMinus,
+    // PA7: PAT=1, PCD=1, PWT=1
+    MemoryType::Uncacheable,
+];
+
+/// Installs [`PAT_LAYOUT`] in `IA32_PAT` on the current core.
+///
+/// # Safety
+///
+/// The caller must have checked
+/// [`FeatureInformationEDX::pat`](crate::arch::x86_64::cpuid::FeatureInformationEDX::pat);
+/// without it, `IA32_PAT` does not exist and writing it raises `#GP`.
+///
+/// `IA32_PAT` is per core, and a mapping carries no record of which layout it
+/// was encoded against. A core that has not run this sees
+/// [`CachingMode::WriteCombined`] as write-back — the reset value of `PA4` —
+/// which is the one mode the reset layout cannot express. Every core must
+/// therefore run this before it uses a mapping made with a caching mode, and
+/// none may run it while a mapping selecting `PA4`..`PA7` is live on it.
+pub unsafe fn install_pat() {
+    let pat = PAT::from_entries(PAT_LAYOUT);
+
+    // Safety: the caller guarantees `IA32_PAT` exists, and the layout leaves
+    // the slots the running mappings select untouched — see `PAT_LAYOUT`.
+    unsafe { pat.write() };
+}
+
+/// The `PAT_LAYOUT` slot a leaf entry has to select to get `caching_mode`,
+/// as the `PAT << 2 | PCD << 1 | PWT` index the entry encodes.
+///
+/// [`CachingMode::Normal`] is x86_64's choice for ordinary memory, which is
+/// write-back — the same slot [`CachingMode::WriteBack`] names outright.
+///
+/// Kept in step with [`PAT_LAYOUT`] by
+/// `a_caching_mode_indexes_the_memory_type_it_names`.
+const fn pat_index(caching_mode: CachingMode) -> usize {
+    match caching_mode {
+        CachingMode::Normal | CachingMode::WriteBack => 0,
+        CachingMode::WriteThrough => 1,
+        CachingMode::Uncached => 3,
+        CachingMode::WriteCombined => 4,
+    }
+}
+
+/// The caching mode a leaf entry selecting slot `index` ends up with.
+///
+/// The inverse of [`pat_index`] on the slots that one produces, except that
+/// the memory type is what it reports: a mapping made with
+/// [`CachingMode::Normal`] comes back as the mode that name resolved to here,
+/// [`CachingMode::WriteBack`].
+///
+/// The remaining slots are never written by this module, but a mapping is not
+/// required to have come from it, so they are folded onto the mode that
+/// describes them: `UC-` differs from `UC` only in letting an MTRR ask for
+/// write-combining, which the kernel does not do.
+///
+/// # Panics
+///
+/// If `index` is not a valid slot index, or the slot holds a memory type no
+/// [`CachingMode`] describes.
+const fn caching_mode(index: usize) -> CachingMode {
+    match PAT_LAYOUT[index] {
+        MemoryType::WriteBack => CachingMode::WriteBack,
+        MemoryType::WriteThrough => CachingMode::WriteThrough,
+        MemoryType::WriteCombining => CachingMode::WriteCombined,
+        MemoryType::Uncacheable | MemoryType::UncachedMinus => CachingMode::Uncached,
+        MemoryType::WriteProtected => {
+            panic!("no caching mode describes the write-protected memory type")
+        }
+    }
+}
 
 /// x86_64 `cr2` register.
 ///
@@ -232,6 +337,40 @@ trait PageTableEntry {
     /// Sets the no-execute (NX) bit of the entry.
     fn set_no_execute(&mut self, no_execute: bool);
 
+    /// Returns `true` if the page-level write-through (PWT) bit is set —
+    /// bit 0 of the memory type index.
+    fn is_write_through(&self) -> bool;
+
+    /// Sets the page-level write-through (PWT) bit of the entry.
+    fn set_write_through(&mut self, write_through: bool);
+
+    /// Returns `true` if the page-level cache disable (PCD) bit is set —
+    /// bit 1 of the memory type index.
+    fn is_cache_disabled(&self) -> bool;
+
+    /// Sets the page-level cache disable (PCD) bit of the entry.
+    fn set_cache_disabled(&mut self, cache_disabled: bool);
+
+    /// Returns `true` if the PAT bit is set — bit 2 of the memory type index.
+    ///
+    /// Only leaf entries have this bit, and where the hardware keeps it
+    /// depends on the level: bit 7 in a [`PTEntry`], bit 12 in a [`PDEntry`]
+    /// or [`PDPEntry`] mapping a page, where bit 7 is taken by the page-size
+    /// flag. Bit 12 is part of the address field of an entry that points to
+    /// the next table instead, so this is meaningful on a leaf only.
+    fn is_pat(&self) -> bool;
+
+    /// Sets the PAT bit of the entry.
+    ///
+    /// # Panics
+    ///
+    /// May panic if the entry is not a leaf; see [`is_pat`](PageTableEntry::is_pat)
+    /// for why the bit only exists there. On a [`PDEntry`] or [`PDPEntry`] the
+    /// bit shares a word with the address, so
+    /// [`set_target`](PageTableEntry::set_target) has to be called first: it
+    /// writes the whole field and would otherwise clear this bit again.
+    fn set_pat(&mut self, pat: bool);
+
     /// Returns the address this entry points to, together with its kind
     /// (next-level table or leaf page).
     fn target(&self) -> Self::Target;
@@ -274,6 +413,40 @@ trait PageTableEntry {
 
         self.set_writable(access_right.is_writable());
         self.set_no_execute(!access_right.is_executable());
+    }
+
+    /// Returns the memory type of the page this leaf entry maps, as the
+    /// [`CachingMode`] whose [`PAT_LAYOUT`] slot the entry's `PAT`, `PCD` and
+    /// `PWT` bits select.
+    ///
+    /// Meaningful on a leaf entry only — an entry pointing to the next table
+    /// carries `PWT` and `PCD` for the walk of that table, and no `PAT` bit
+    /// at all.
+    fn caching_mode(&self) -> CachingMode {
+        let index = (self.is_pat() as usize) << 2
+            | (self.is_cache_disabled() as usize) << 1
+            | self.is_write_through() as usize;
+
+        caching_mode(index)
+    }
+
+    /// Gives the page this leaf entry maps the memory type `caching_mode`
+    /// asks for.
+    ///
+    /// Requires the layout of [`PAT_LAYOUT`] to be installed on the core the
+    /// mapping is used from; see [`install_pat`].
+    ///
+    /// # Panics
+    ///
+    /// As [`set_pat`](PageTableEntry::set_pat): on a [`PDEntry`] or
+    /// [`PDPEntry`] this must follow the
+    /// [`set_target`](PageTableEntry::set_target) of the same leaf.
+    fn set_caching_mode(&mut self, caching_mode: CachingMode) {
+        let index = pat_index(caching_mode);
+
+        self.set_write_through(index & 0b001 != 0);
+        self.set_cache_disabled(index & 0b010 != 0);
+        self.set_pat(index & 0b100 != 0);
     }
 
     /// Returns the privilege level required to access the region governed by
@@ -468,6 +641,18 @@ impl PageTableEntry for PML4Entry {
         self.no_execute()
     }
 
+    fn is_write_through(&self) -> bool {
+        self.pwt()
+    }
+    fn is_cache_disabled(&self) -> bool {
+        self.pcd()
+    }
+    /// A PML4 entry never maps a page, and x86_64 gives it no PAT bit: bit 12
+    /// is the lowest bit of the PDP address.
+    fn is_pat(&self) -> bool {
+        false
+    }
+
     fn set_present(&mut self, val: bool) {
         PML4Entry::set_present(self, val);
     }
@@ -482,6 +667,21 @@ impl PageTableEntry for PML4Entry {
 
     fn set_no_execute(&mut self, val: bool) {
         PML4Entry::set_no_execute(self, val);
+    }
+
+    fn set_write_through(&mut self, val: bool) {
+        PML4Entry::set_pwt(self, val);
+    }
+
+    fn set_cache_disabled(&mut self, val: bool) {
+        PML4Entry::set_pcd(self, val);
+    }
+
+    /// # Panics
+    ///
+    /// If `val` is set: there is no PAT bit at this level to put it in.
+    fn set_pat(&mut self, val: bool) {
+        assert!(!val, "a PML4 entry has no PAT bit");
     }
 
     fn target(&self) -> PhysicalAddress<PDP> {
@@ -626,8 +826,9 @@ impl Display for PDPEntry {
                 true => write!(
                     f,
                     "0x{:016x} (present: {}, writable: {}, user-accessible: {}, \
-                     accessed: {}, dirty: {}, global: {}, available: 0b{:03b}, \
-                     address: 0x{:016x}, available: 0b{:011b}, non-executable: {})",
+                     accessed: {}, dirty: {}, global: {}, caching: {}, \
+                     available: 0b{:03b}, address: 0x{:016x}, \
+                     available: 0b{:011b}, non-executable: {})",
                     self.0,
                     true,
                     self.writable(),
@@ -635,8 +836,10 @@ impl Display for PDPEntry {
                     self.accessed(),
                     self.dirty(),
                     self.global(),
+                    PageTableEntry::caching_mode(self),
                     self.available_0(),
-                    self.addr() << GIGANTIC_PAGE_SHIFT as u64,
+                    (self.addr() >> (GIGANTIC_PAGE_SHIFT - REGULAR_PAGE_SHIFT) as u64)
+                        << GIGANTIC_PAGE_SHIFT as u64,
                     self.available_1(),
                     self.no_execute(),
                 ),
@@ -681,6 +884,18 @@ impl PageTableEntry for PDPEntry {
         self.no_execute()
     }
 
+    fn is_write_through(&self) -> bool {
+        self.pwt()
+    }
+    fn is_cache_disabled(&self) -> bool {
+        self.pcd()
+    }
+    /// Bit 12 of a gigantic leaf, which is the lowest bit of the address
+    /// field — free there, since the page is 1 GiB aligned.
+    fn is_pat(&self) -> bool {
+        self.addr() & 1 != 0
+    }
+
     fn set_present(&mut self, val: bool) {
         PDPEntry::set_present(self, val);
     }
@@ -695,6 +910,28 @@ impl PageTableEntry for PDPEntry {
 
     fn set_no_execute(&mut self, val: bool) {
         PDPEntry::set_no_execute(self, val);
+    }
+
+    fn set_write_through(&mut self, val: bool) {
+        PDPEntry::set_pwt(self, val);
+    }
+
+    fn set_cache_disabled(&mut self, val: bool) {
+        PDPEntry::set_pcd(self, val);
+    }
+
+    /// # Panics
+    ///
+    /// If the entry does not map a gigantic page. The bit lives in the
+    /// address field, where an entry pointing to a PD keeps address bit 12,
+    /// so writing it there would move the table.
+    fn set_pat(&mut self, val: bool) {
+        assert!(
+            self.gigantic_page(),
+            "only a gigantic leaf has a PAT bit; set the target first"
+        );
+
+        PDPEntry::set_addr(self, (self.addr() & !1) | val as u64);
     }
 
     fn target(&self) -> PageTableTarget<PD> {
@@ -855,8 +1092,9 @@ impl Display for PDEntry {
                 true => write!(
                     f,
                     "0x{:016x} (present: {}, writable: {}, user-accessible: {}, \
-                     accessed: {}, dirty: {}, global: {}, available: 0b{:03b}, \
-                     address: 0x{:016x}, available: 0b{:011b}, non-executable: {})",
+                     accessed: {}, dirty: {}, global: {}, caching: {}, \
+                     available: 0b{:03b}, address: 0x{:016x}, \
+                     available: 0b{:011b}, non-executable: {})",
                     self.0,
                     true,
                     self.writable(),
@@ -864,8 +1102,10 @@ impl Display for PDEntry {
                     self.accessed(),
                     self.dirty(),
                     self.global(),
+                    PageTableEntry::caching_mode(self),
                     self.available_0(),
-                    self.addr() << HUGE_PAGE_SHIFT as u64,
+                    (self.addr() >> (HUGE_PAGE_SHIFT - REGULAR_PAGE_SHIFT) as u64)
+                        << HUGE_PAGE_SHIFT as u64,
                     self.available_1(),
                     self.no_execute(),
                 ),
@@ -910,6 +1150,18 @@ impl PageTableEntry for PDEntry {
         self.no_execute()
     }
 
+    fn is_write_through(&self) -> bool {
+        self.pwt()
+    }
+    fn is_cache_disabled(&self) -> bool {
+        self.pcd()
+    }
+    /// Bit 12 of a huge leaf, which is the lowest bit of the address field —
+    /// free there, since the page is 2 MiB aligned.
+    fn is_pat(&self) -> bool {
+        self.addr() & 1 != 0
+    }
+
     fn set_present(&mut self, val: bool) {
         PDEntry::set_present(self, val);
     }
@@ -924,6 +1176,28 @@ impl PageTableEntry for PDEntry {
 
     fn set_no_execute(&mut self, val: bool) {
         PDEntry::set_no_execute(self, val);
+    }
+
+    fn set_write_through(&mut self, val: bool) {
+        PDEntry::set_pwt(self, val);
+    }
+
+    fn set_cache_disabled(&mut self, val: bool) {
+        PDEntry::set_pcd(self, val);
+    }
+
+    /// # Panics
+    ///
+    /// If the entry does not map a huge page. The bit lives in the address
+    /// field, where an entry pointing to a PT keeps address bit 12, so
+    /// writing it there would move the table.
+    fn set_pat(&mut self, val: bool) {
+        assert!(
+            self.huge_page(),
+            "only a huge leaf has a PAT bit; set the target first"
+        );
+
+        PDEntry::set_addr(self, (self.addr() & !1) | val as u64);
     }
 
     fn target(&self) -> PageTableTarget<PT> {
@@ -1084,8 +1358,9 @@ impl Display for PTEntry {
             true => write!(
                 f,
                 "0x{:016x} (present: {}, writable: {}, user-accessible: {}, \
-                 accessed: {}, dirty: {}, global: {}, available: 0b{:03b}, \
-                 address: 0x{:016x}, available: 0b{:07b}, non-executable: {})",
+                 accessed: {}, dirty: {}, global: {}, caching: {}, \
+                 available: 0b{:03b}, address: 0x{:016x}, \
+                 available: 0b{:07b}, non-executable: {})",
                 self.0,
                 true,
                 self.writable(),
@@ -1093,6 +1368,7 @@ impl Display for PTEntry {
                 self.accessed(),
                 self.dirty(),
                 self.global(),
+                PageTableEntry::caching_mode(self),
                 self.available_0(),
                 self.addr() << REGULAR_PAGE_SHIFT as u64,
                 self.available_1(),
@@ -1124,6 +1400,16 @@ impl PageTableEntry for PTEntry {
         self.no_execute()
     }
 
+    fn is_write_through(&self) -> bool {
+        self.pwt()
+    }
+    fn is_cache_disabled(&self) -> bool {
+        self.pcd()
+    }
+    fn is_pat(&self) -> bool {
+        self.pat()
+    }
+
     fn set_present(&mut self, val: bool) {
         PTEntry::set_present(self, val);
     }
@@ -1138,6 +1424,18 @@ impl PageTableEntry for PTEntry {
 
     fn set_no_execute(&mut self, val: bool) {
         PTEntry::set_no_execute(self, val);
+    }
+
+    fn set_write_through(&mut self, val: bool) {
+        PTEntry::set_pwt(self, val);
+    }
+
+    fn set_cache_disabled(&mut self, val: bool) {
+        PTEntry::set_pcd(self, val);
+    }
+
+    fn set_pat(&mut self, val: bool) {
+        PTEntry::set_pat(self, val);
     }
 
     fn target(&self) -> PhysicalAddress<c_void> {
@@ -1235,6 +1533,7 @@ impl<PFA: PageFrameAllocator> Paging<PFA> {
                     phys_addr,
                     PrivilegeLevel::Kernel,
                     AccessRights::full(),
+                    CachingMode::Normal,
                     PageSize::Gigantic,
                     token,
                 )
@@ -1262,6 +1561,7 @@ impl<PFA: PageFrameAllocator> Paging<PFA> {
                     phys_addr,
                     PrivilegeLevel::Kernel,
                     AccessRights::full(),
+                    CachingMode::Normal,
                     PageSize::Gigantic,
                     token,
                 )
@@ -1390,6 +1690,13 @@ impl<PFA: PageFrameAllocator> Paging<PFA> {
                                 phys_addr.byte_add(offset),
                                 PrivilegeLevel::Kernel,
                                 access_rights,
+                                // Everything mapped here is RAM, so it gets
+                                // what x86_64 caches RAM as. Memory that is
+                                // not — a device's registers, a framebuffer —
+                                // is reached through a mapping of its own,
+                                // made with the mode it needs, and not
+                                // through the direct map below.
+                                CachingMode::Normal,
                                 page_size,
                                 token,
                             )?
@@ -1755,7 +2062,12 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
     ///
     /// Intermediate (non-leaf) entries are created with the most permissive
     /// flags (user-accessible, writable, executable); the effective
-    /// permissions of a mapping are governed solely by its leaf entry.
+    /// permissions of a mapping are governed solely by its leaf entry. Their
+    /// `PWT` and `PCD` bits stay clear, so the page walk itself reads the
+    /// tables write-back whatever memory type the mapping asks for.
+    ///
+    /// `caching_mode` is encoded against [`PAT_LAYOUT`], which the core using
+    /// the mapping must have installed; see [`install_pat`].
     ///
     /// # Errors
     ///
@@ -1773,6 +2085,10 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
     /// - `privilege_level` and `access_rights` are correct for the intended
     ///   use; incorrect values can expose kernel memory to userspace or allow
     ///   unintended writes.
+    /// - `caching_mode` matches what is behind `physical_address`, and no
+    ///   other live mapping of that frame disagrees with it — x86_64 leaves
+    ///   the behaviour of two mappings of one frame with different memory
+    ///   types undefined.
     /// - `virtual_address` is canonical on x86_64.
     unsafe fn map<T, Token>(
         &mut self,
@@ -1780,6 +2096,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
         physical_address: PhysicalAddress<T>,
         privilege_level: PrivilegeLevel,
         access_rights: AccessRights,
+        caching_mode: CachingMode,
         size: PageSize,
         token: Token,
     ) -> Result<(Option<(PhysicalAddress<T>, PageSize)>, Token), (PagingError, Token)>
@@ -1890,7 +2207,11 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
                 false => None,
             };
 
+            // `set_caching_mode` follows `set_target`: the PAT bit of a
+            // gigantic leaf sits in the address field, which the target write
+            // replaces wholesale.
             pdp_entry.set_target(PageTableTarget::Page(physical_address.cast()));
+            pdp_entry.set_caching_mode(caching_mode);
             pdp_entry.set_privilege_level(privilege_level);
             pdp_entry.set_access_rights(access_rights);
             pdp_entry.set_accessed(false);
@@ -1966,7 +2287,10 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
                 false => None,
             };
 
+            // As above: the PAT bit of a huge leaf lives in the address
+            // field, so the target has to be in place first.
             pd_entry.set_target(PageTableTarget::Page(physical_address.cast()));
+            pd_entry.set_caching_mode(caching_mode);
             pd_entry.set_privilege_level(privilege_level);
             pd_entry.set_access_rights(access_rights);
             pd_entry.set_accessed(false);
@@ -2046,6 +2370,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
         };
 
         pt_entry.set_target(physical_address.cast());
+        pt_entry.set_caching_mode(caching_mode);
         pt_entry.set_privilege_level(privilege_level);
         pt_entry.set_access_rights(access_rights);
         pt_entry.set_accessed(false);
@@ -2232,13 +2557,16 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
     }
 
     /// Resolves `virtual_address` by walking the page table and returns the
-    /// mapped physical address, privilege level, effective access rights, and
-    /// page size.
+    /// mapped physical address, privilege level, effective access rights,
+    /// caching mode, and page size.
     ///
     /// The effective access rights are computed by AND-ing the writable and
     /// no-execute bits across every walked level; a present entry is always
     /// readable on x86_64. The effective privilege level is `User` only if
-    /// every level has `U/S = 1`.
+    /// every level has `U/S = 1`. The caching mode, unlike either of those,
+    /// is taken from the leaf entry alone — that is where the hardware reads
+    /// it from — and is only what it says if the core has [`PAT_LAYOUT`]
+    /// installed.
     ///
     /// # Errors
     ///
@@ -2247,7 +2575,16 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
     fn resolve<T>(
         &self,
         virtual_address: VirtualAddress<T>,
-    ) -> Result<(PhysicalAddress<T>, PrivilegeLevel, AccessRights, PageSize), PagingError> {
+    ) -> Result<
+        (
+            PhysicalAddress<T>,
+            PrivilegeLevel,
+            AccessRights,
+            CachingMode,
+            PageSize,
+        ),
+        PagingError,
+    > {
         // Check if virtual address is canonical
         if !Self::is_canonical(virtual_address) {
             return Err(PagingError::InvalidAddress);
@@ -2299,6 +2636,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
                     phys_addr.cast(),
                     privilege_level,
                     access_rights,
+                    pdp_entry.caching_mode(),
                     PageSize::Gigantic,
                 ));
             }
@@ -2330,6 +2668,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
                     phys_addr.cast(),
                     privilege_level,
                     access_rights,
+                    pd_entry.caching_mode(),
                     PageSize::Huge,
                 ));
             }
@@ -2360,6 +2699,7 @@ impl<PFA: PageFrameAllocator> crate::arch::generic::paging::Paging<PFA> for Pagi
             pt_entry.target().cast(),
             privilege_level,
             access_rights,
+            pt_entry.caching_mode(),
             PageSize::Regular,
         ))
     }
@@ -2582,6 +2922,7 @@ mod test {
                 dst_phys_addr,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -2596,7 +2937,7 @@ mod test {
 
         // Resolve mapping
         match paging.resolve(src_virt_addr) {
-            Ok((phys_addr, priv_level, access_rights, page_size)) => {
+            Ok((phys_addr, priv_level, access_rights, _caching_mode, page_size)) => {
                 assert!(
                     phys_addr == dst_phys_addr,
                     "Expected: {:?}, got: {:?}",
@@ -2660,6 +3001,7 @@ mod test {
                 dst_phys_addr,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Huge,
                 token,
             )
@@ -2674,7 +3016,7 @@ mod test {
 
         // Resolve mapping
         match paging.resolve(src_virt_addr) {
-            Ok((phys_addr, priv_level, access_rights, page_size)) => {
+            Ok((phys_addr, priv_level, access_rights, _caching_mode, page_size)) => {
                 assert!(
                     phys_addr == dst_phys_addr,
                     "Expected: {:?}, got: {:?}",
@@ -2740,6 +3082,7 @@ mod test {
                 dst_phys_addr,
                 PrivilegeLevel::Kernel,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Gigantic,
                 token,
             )
@@ -2753,7 +3096,7 @@ mod test {
         page_frames.insert(dst_phys_addr, PageSize::Gigantic);
 
         match paging.resolve(src_virt_addr) {
-            Ok((phys_addr, priv_level, access_rights, page_size)) => {
+            Ok((phys_addr, priv_level, access_rights, _caching_mode, page_size)) => {
                 assert_eq!(phys_addr, dst_phys_addr);
                 assert_eq!(priv_level, PrivilegeLevel::Kernel);
                 assert_eq!(access_rights, AccessRights::full());
@@ -2807,6 +3150,7 @@ mod test {
                 mapped_phys,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -2847,6 +3191,7 @@ mod test {
                 phys,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -2891,6 +3236,7 @@ mod test {
                 phys,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Huge,
                 token,
             )
@@ -2933,6 +3279,7 @@ mod test {
                 phys,
                 PrivilegeLevel::Kernel,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Gigantic,
                 token,
             )
@@ -2976,6 +3323,7 @@ mod test {
                 phys_a,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -3013,6 +3361,7 @@ mod test {
                 phys_4k,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -3030,6 +3379,7 @@ mod test {
                 phys_1g,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Gigantic,
                 token,
             )
@@ -3060,6 +3410,7 @@ mod test {
                 phys_2m,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Huge,
                 token,
             )
@@ -3076,6 +3427,7 @@ mod test {
                 phys_4k,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -3111,6 +3463,7 @@ mod test {
                 phys_a,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -3129,6 +3482,7 @@ mod test {
                 phys_b,
                 PrivilegeLevel::Kernel,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -3144,7 +3498,7 @@ mod test {
 
         // The new mapping resolves to phys_b with Kernel privilege.
         match paging.resolve(virt) {
-            Ok((phys, priv_level, _, size)) => {
+            Ok((phys, priv_level, _, _, size)) => {
                 assert_eq!(phys, phys_b);
                 assert_eq!(priv_level, PrivilegeLevel::Kernel);
                 assert_eq!(size, PageSize::Regular);
@@ -3176,6 +3530,7 @@ mod test {
                 phys_a,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Huge,
                 token,
             )
@@ -3190,6 +3545,7 @@ mod test {
                 phys_b,
                 PrivilegeLevel::Kernel,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Huge,
                 token,
             )
@@ -3224,6 +3580,7 @@ mod test {
                 phys,
                 PrivilegeLevel::Kernel,
                 ro,
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -3233,7 +3590,7 @@ mod test {
         };
 
         match paging.resolve(virt) {
-            Ok((_, priv_level, access_rights, _)) => {
+            Ok((_, priv_level, access_rights, _, _)) => {
                 assert_eq!(priv_level, PrivilegeLevel::Kernel);
                 assert!(access_rights.is_readable());
                 assert!(!access_rights.is_writable());
@@ -3263,6 +3620,7 @@ mod test {
                 phys,
                 PrivilegeLevel::User,
                 rx,
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -3272,7 +3630,7 @@ mod test {
         };
 
         match paging.resolve(virt) {
-            Ok((_, priv_level, access_rights, _)) => {
+            Ok((_, priv_level, access_rights, _, _)) => {
                 assert_eq!(priv_level, PrivilegeLevel::User);
                 assert!(access_rights.is_readable());
                 assert!(!access_rights.is_writable());
@@ -3308,6 +3666,7 @@ mod test {
                     phys,
                     PrivilegeLevel::User,
                     AccessRights::full(),
+                    CachingMode::Normal,
                     PageSize::Regular,
                     token,
                 )
@@ -3322,7 +3681,7 @@ mod test {
         // Resolve each.
         for i in 0..N {
             match paging.resolve(virts[i]) {
-                Ok((phys, _, _, size)) => {
+                Ok((phys, _, _, _, size)) => {
                     assert_eq!(phys, physs[i]);
                     assert_eq!(size, PageSize::Regular);
                 }
@@ -3350,7 +3709,7 @@ mod test {
             // All subsequent addresses must still resolve.
             for j in (i + 1)..N {
                 match paging.resolve(virts[j]) {
-                    Ok((phys, _, _, _)) => assert_eq!(phys, physs[j]),
+                    Ok((phys, _, _, _, _)) => assert_eq!(phys, physs[j]),
                     Err(e) => panic!(
                         "resolve unexpectedly failed for mapping {} after unmap {}: {}",
                         j, i, e
@@ -3394,6 +3753,7 @@ mod test {
                     p,
                     PrivilegeLevel::Kernel,
                     AccessRights::full(),
+                    CachingMode::Normal,
                     size,
                     token,
                 )
@@ -3405,9 +3765,9 @@ mod test {
         }
 
         // Verify each resolves correctly.
-        assert_eq!(paging.resolve(virt_1g).unwrap().3, PageSize::Gigantic);
-        assert_eq!(paging.resolve(virt_2m).unwrap().3, PageSize::Huge);
-        assert_eq!(paging.resolve(virt_4k).unwrap().3, PageSize::Regular);
+        assert_eq!(paging.resolve(virt_1g).unwrap().4, PageSize::Gigantic);
+        assert_eq!(paging.resolve(virt_2m).unwrap().4, PageSize::Huge);
+        assert_eq!(paging.resolve(virt_4k).unwrap().4, PageSize::Regular);
 
         let pf_cb = |phys_addr, page_size, token| {
             let prev = page_frames.remove(&phys_addr);
@@ -3438,6 +3798,7 @@ mod test {
                 phys,
                 PrivilegeLevel::User,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -3485,6 +3846,7 @@ mod test {
                     phys,
                     PrivilegeLevel::User,
                     AccessRights::full(),
+                    CachingMode::Normal,
                     PageSize::Regular,
                     token,
                 )
@@ -3532,6 +3894,7 @@ mod test {
                 phys,
                 PrivilegeLevel::Kernel,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -3541,7 +3904,7 @@ mod test {
         };
 
         match paging.resolve(virt) {
-            Ok((_, priv_level, _, _)) => assert_eq!(priv_level, PrivilegeLevel::Kernel),
+            Ok((_, priv_level, _, _, _)) => assert_eq!(priv_level, PrivilegeLevel::Kernel),
             Err(e) => panic!("{}", e),
         }
 
@@ -3563,6 +3926,7 @@ mod test {
                 PhysicalAddress::<usize>::new(0x00007ffffffff000usize as _),
                 PrivilegeLevel::Kernel,
                 AccessRights::full(),
+                CachingMode::Normal,
                 PageSize::Regular,
                 token,
             )
@@ -3732,5 +4096,227 @@ mod test {
             PHYSICAL_MEMORY_MAP_START + (PHYSICAL_MEMORY_MAP_SIZE - 1),
             usize::MAX
         );
+    }
+
+    /// A leaf's `PAT`, `PCD` and `PWT` bits are an index into [`PAT_LAYOUT`],
+    /// so a caching mode is worth whatever the slot it picks holds. This is
+    /// what keeps the two ends in step.
+    #[test]
+    fn a_caching_mode_indexes_the_memory_type_it_names() {
+        for (caching_mode, memory_type, resolved) in [
+            // What x86_64 makes of the architecture's own choice.
+            (
+                CachingMode::Normal,
+                MemoryType::WriteBack,
+                CachingMode::WriteBack,
+            ),
+            (
+                CachingMode::WriteBack,
+                MemoryType::WriteBack,
+                CachingMode::WriteBack,
+            ),
+            (
+                CachingMode::WriteThrough,
+                MemoryType::WriteThrough,
+                CachingMode::WriteThrough,
+            ),
+            (
+                CachingMode::Uncached,
+                MemoryType::Uncacheable,
+                CachingMode::Uncached,
+            ),
+            (
+                CachingMode::WriteCombined,
+                MemoryType::WriteCombining,
+                CachingMode::WriteCombined,
+            ),
+        ] {
+            let index = pat_index(caching_mode);
+
+            assert_eq!(
+                PAT_LAYOUT[index], memory_type,
+                "{caching_mode} picks PA{index}, which holds {}",
+                PAT_LAYOUT[index]
+            );
+            assert_eq!(super::caching_mode(index), resolved);
+        }
+    }
+
+    /// The first four slots are the reset layout, which is what lets the
+    /// layout be installed under mappings that already exist. The whole
+    /// register is spelled out here, so that changing a slot has to be
+    /// deliberate.
+    #[test]
+    fn the_layout_keeps_the_slots_the_processor_starts_with() {
+        assert_eq!(
+            PAT_LAYOUT[..4],
+            [
+                MemoryType::WriteBack,
+                MemoryType::WriteThrough,
+                MemoryType::UncachedMinus,
+                MemoryType::Uncacheable,
+            ]
+        );
+
+        assert_eq!(PAT::from_entries(PAT_LAYOUT).raw(), 0x0007_0401_0007_0406);
+    }
+
+    /// A mapping comes back out of `resolve` with the mode it went in with,
+    /// at every page size — [`CachingMode::Normal`] as the write-back it
+    /// names here, the rest as themselves.
+    ///
+    /// The physical address is checked along with it, and not incidentally:
+    /// on a huge or gigantic leaf the `PAT` bit lives inside the address
+    /// field, so a mode that needs it is one bit away from moving the page.
+    #[test]
+    fn a_mapping_keeps_the_caching_mode_it_was_made_with() {
+        // Enter syscall level
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, mut token) = SyscallLevel::enter(root_token);
+
+        // Track page frames
+        let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
+
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
+
+        for page_size in [PageSize::Regular, PageSize::Huge, PageSize::Gigantic] {
+            for (caching_mode, expected) in [
+                (CachingMode::Normal, CachingMode::WriteBack),
+                (CachingMode::WriteBack, CachingMode::WriteBack),
+                (CachingMode::Uncached, CachingMode::Uncached),
+                (CachingMode::WriteCombined, CachingMode::WriteCombined),
+                (CachingMode::WriteThrough, CachingMode::WriteThrough),
+            ] {
+                let virt_addr = TestPageFrameAllocator::next_virtual_addr(page_size);
+                let phys_addr = TestPageFrameAllocator::virt_to_phys(virt_addr);
+
+                token = match unsafe {
+                    paging.map(
+                        virt_addr,
+                        phys_addr,
+                        PrivilegeLevel::Kernel,
+                        AccessRights::full(),
+                        caching_mode,
+                        page_size,
+                        token,
+                    )
+                } {
+                    Ok((prev, token)) => {
+                        assert!(prev.is_none());
+                        token
+                    }
+                    Err((error, _token)) => {
+                        panic!("Unexpected error mapping a {page_size} page: {error}")
+                    }
+                };
+                page_frames.insert(phys_addr, page_size);
+
+                match paging.resolve(virt_addr) {
+                    Ok((resolved, _, _, resolved_mode, resolved_size)) => {
+                        assert!(
+                            resolved == phys_addr,
+                            "Expected: {:p}, got: {:p}",
+                            phys_addr,
+                            resolved
+                        );
+                        assert!(
+                            resolved_mode == expected,
+                            "{caching_mode} resolved to {resolved_mode}, expected {expected}"
+                        );
+                        assert!(
+                            resolved_size == page_size,
+                            "Expected: {}, got: {}",
+                            page_size,
+                            resolved_size
+                        );
+                    }
+                    Err(error) => panic!("Unexpected error during resolving: {error}"),
+                }
+            }
+        }
+
+        // Perform clean up
+        let pf_cb = |phys_addr, page_size, token| {
+            let prev = page_frames.remove(&phys_addr);
+            assert!(prev == Some(page_size));
+            token
+        };
+        let token = unsafe { paging.destroy(pf_cb, token) };
+
+        // Leave syscall level
+        syscall_level.leave(token);
+
+        // Check if no page frames were leaked
+        assert!(!TestPageFrameAllocator::leaked());
+    }
+
+    /// Only the leaf carries the mode; the tables on the way to it are walked
+    /// write-back, whatever the page they lead to is mapped as.
+    #[test]
+    fn the_tables_on_the_way_stay_cacheable() {
+        // Enter syscall level
+        let root_token = unsafe { RootToken::forge() };
+        let (syscall_level, token) = SyscallLevel::enter(root_token);
+
+        // Track page frames
+        let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
+
+        let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
+        let virt_addr = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
+        let phys_addr = TestPageFrameAllocator::virt_to_phys(virt_addr);
+
+        let token = match unsafe {
+            paging.map(
+                virt_addr,
+                phys_addr,
+                PrivilegeLevel::Kernel,
+                AccessRights::full(),
+                CachingMode::Uncached,
+                PageSize::Regular,
+                token,
+            )
+        } {
+            Ok((_, token)) => token,
+            Err((error, _token)) => panic!("Unexpected error during mapping: {error}"),
+        };
+        page_frames.insert(phys_addr, PageSize::Regular);
+
+        // Safety: the root was just written by `map`, and the walk follows
+        // the addresses that call put there.
+        let pml4 = unsafe { paging.phys_to_virt(paging.cr3.pml4()).as_ref() };
+        let pml4_entry = pml4.entry_for(virt_addr);
+        assert!(!pml4_entry.is_write_through() && !pml4_entry.is_cache_disabled());
+
+        let pdp = unsafe { paging.phys_to_virt(pml4_entry.target()).as_ref() };
+        let pdp_entry = pdp.entry_for(virt_addr);
+        assert!(!pdp_entry.is_write_through() && !pdp_entry.is_cache_disabled());
+
+        let PageTableTarget::PageTable(pd_phys) = pdp_entry.target() else {
+            panic!("Expected a page directory below a regular mapping");
+        };
+        let pd = unsafe { paging.phys_to_virt(pd_phys).as_ref() };
+        let pd_entry = pd.entry_for(virt_addr);
+        assert!(!pd_entry.is_write_through() && !pd_entry.is_cache_disabled());
+
+        // The leaf, in contrast, is the one that was asked for.
+        assert_eq!(
+            paging.resolve(virt_addr).unwrap().3,
+            CachingMode::Uncached,
+            "the leaf is where the mode belongs"
+        );
+
+        // Perform clean up
+        let pf_cb = |phys_addr, page_size, token| {
+            let prev = page_frames.remove(&phys_addr);
+            assert!(prev == Some(page_size));
+            token
+        };
+        let token = unsafe { paging.destroy(pf_cb, token) };
+
+        // Leave syscall level
+        syscall_level.leave(token);
+
+        // Check if no page frames were leaked
+        assert!(!TestPageFrameAllocator::leaked());
     }
 }

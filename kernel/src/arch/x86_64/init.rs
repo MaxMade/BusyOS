@@ -127,16 +127,21 @@ pub extern "C" fn start() -> i32 {
     }
 
     // Setup kernel mapping
-    let (paging, token): (Paging<EarlyPageFrames>, Token<_, _, _>) =
-        match Paging::kernel_mapping(bootinfo, token) {
-            Ok((paging, token)) => (paging, token),
-            Err((error, _)) => panic!("Unable to setup kernel mapping: {}", error),
-        };
-    unsafe { paging.activate() };
+    if cpu_id == BOOT_CPUID {
+        let (paging, t): (Paging<EarlyPageFrames>, Token<_, _, _>) =
+            match Paging::kernel_mapping(bootinfo, token) {
+                Ok((paging, t)) => (paging, t),
+                Err((error, _)) => panic!("Unable to setup kernel mapping: {}", error),
+            };
+        token = t;
+        unsafe { paging.activate() };
+    }
 
-    // Prepare Page frames
-    let token = PageFrames::handover_from_early(token);
-    let token = unsafe { PageFrames::init_from_bootinfo(token) };
+    // Prepare page frames
+    if cpu_id == BOOT_CPUID {
+        token = PageFrames::handover_from_early(token);
+        token = unsafe { PageFrames::init_from_bootinfo(token) };
+    }
 
     init_level.leave(token);
 

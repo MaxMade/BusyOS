@@ -11,6 +11,7 @@
 //! - [`AccessRights`] encodes read/write/execute permissions as a compact
 //!   bitmask.
 //! - [`PageSize`] describes the page size used for a mapping.
+//! - [`CachingMode`] describes the memory type of a mapping.
 //! - [`PageFrameAllocator`] abstracts physical memory allocation behind
 //!   the locking hierarchy.
 //! - [`Paging`] is the architecture-generic interface for manipulating
@@ -331,6 +332,76 @@ impl Display for PageSize {
     }
 }
 
+/// The memory type of a mapping — how far the CPU may go in caching accesses
+/// made through it.
+///
+/// Ordinary RAM wants [`Normal`](CachingMode::Normal), which is what
+/// [`Default`] gives and what leaves the choice where it belongs, with the
+/// architecture. The named modes exist for addresses that are not RAM, where
+/// a cache's freedom to delay, merge and reorder accesses is visible to
+/// whatever sits behind them — a device register that counts every read, a
+/// framebuffer that only wants the writes to arrive eventually.
+///
+/// The mode governs a mapping, not a frame: the same physical memory reached
+/// through two mappings of different modes is cached two different ways, and
+/// on x86_64 that is an aliasing rule violation the architecture leaves
+/// undefined. A frame should therefore be mapped with one mode at a time,
+/// which includes the mode it carries in the kernel's direct map.
+///
+/// On x86_64 the mode is encoded as an index into the `IA32_PAT` MSR, built
+/// from the `PWT`, `PCD` and `PAT` bits of the leaf entry; see
+/// `arch::x86_64::paging::PAT_LAYOUT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CachingMode {
+    /// Whatever the architecture caches ordinary memory as — write-back,
+    /// wherever the choice exists.
+    ///
+    /// The mode for RAM, and the one to ask for when the memory behind a
+    /// mapping has no demands of its own. It names no memory type, so a
+    /// mapping made with it comes back out of [`Paging::resolve`] as the
+    /// concrete mode the architecture picked, not as this.
+    #[default]
+    Normal,
+    /// Write-back (`WB`) — reads and writes are cached, writes reach memory
+    /// only when the line is evicted.
+    ///
+    /// What [`Normal`](CachingMode::Normal) amounts to on the architectures
+    /// that offer it; worth naming outright only where a mapping has to be
+    /// write-back for a reason of its own.
+    WriteBack,
+    /// Uncached (`UC`) — every access goes to the bus, in program order,
+    /// exactly as many times as the program makes it.
+    ///
+    /// The mode for device registers, where a read can have a side effect and
+    /// a dropped write is a lost command.
+    Uncached,
+    /// Write-combined (`WC`) — reads are uncached, writes are gathered in a
+    /// buffer and released as bursts, in no particular order.
+    ///
+    /// For memory written in bulk and never read back, a framebuffer being
+    /// the usual one. Anything that cares about the order its writes land in
+    /// needs a fence, or another mode.
+    WriteCombined,
+    /// Write-through (`WT`) — reads are cached, writes update the cache and
+    /// memory both.
+    ///
+    /// For memory a second party reads without going through this CPU's
+    /// caches, while the CPU itself still benefits from caching its reads.
+    WriteThrough,
+}
+
+impl Display for CachingMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CachingMode::Normal => write!(f, "normal"),
+            CachingMode::WriteBack => write!(f, "write-back"),
+            CachingMode::Uncached => write!(f, "uncached"),
+            CachingMode::WriteCombined => write!(f, "write-combined"),
+            CachingMode::WriteThrough => write!(f, "write-through"),
+        }
+    }
+}
+
 /// Allocates and frees physical page frames.
 ///
 /// Implementors manage a pool of physical memory and hand out frames on demand,
@@ -463,6 +534,7 @@ pub trait Paging<PFA: PageFrameAllocator> {
     /// - `phys_addr` — the physical address to map it to.
     /// - `privilege_level` — whether the mapping is accessible from userspace.
     /// - `access_rights` — read/write/execute permissions.
+    /// - `caching_mode` — the memory type accesses through this mapping get.
     /// - `size` — page size (4 KiB / 2 MiB / 1 GiB).
     ///
     /// # Safety
@@ -472,13 +544,14 @@ pub trait Paging<PFA: PageFrameAllocator> {
     /// - Mapping the wrong physical address can silently corrupt memory.
     /// - The caller must ensure no conflicting aliases are created (e.g.
     ///   mapping the same frame as both writable and executable in a
-    ///   W^X policy).
+    ///   W^X policy, or under two different [`CachingMode`]s).
     unsafe fn map<T, Token>(
         &mut self,
         virt_addr: VirtualAddress<T>,
         phys_addr: PhysicalAddress<T>,
         privilege_level: PrivilegeLevel,
         access_rights: AccessRights,
+        caching_mode: CachingMode,
         size: PageSize,
         token: Token,
     ) -> Result<(Option<(PhysicalAddress<T>, PageSize)>, Token), (Error, Token)>
@@ -510,12 +583,22 @@ pub trait Paging<PFA: PageFrameAllocator> {
     /// Walks the page table to resolve `virt_addr` to its physical address
     /// and mapping attributes.
     ///
-    /// Returns `(physical_address, privilege_level, access_rights, page_size)`
-    /// for the mapping covering `virt_addr`, or an error if no mapping exists.
+    /// Returns `(physical_address, privilege_level, access_rights,
+    /// caching_mode, page_size)` for the mapping covering `virt_addr`, or an
+    /// error if no mapping exists.
     fn resolve<T>(
         &self,
         virt_addr: VirtualAddress<T>,
-    ) -> Result<(PhysicalAddress<T>, PrivilegeLevel, AccessRights, PageSize), Error>;
+    ) -> Result<
+        (
+            PhysicalAddress<T>,
+            PrivilegeLevel,
+            AccessRights,
+            CachingMode,
+            PageSize,
+        ),
+        Error,
+    >;
 
     /// Invalidates the TLB entry for a single virtual address on the local CPU.
     ///
@@ -681,6 +764,28 @@ mod test {
         rights.set_writable(false);
         assert!(!rights.is_writable());
         assert_eq!(rights, AccessRights::none());
+    }
+
+    /// A caller with no reason to care gets the architecture's own answer,
+    /// rather than a memory type this layer picked for it.
+    #[test]
+    fn the_default_caching_mode_is_the_architecture_s() {
+        assert_eq!(CachingMode::default(), CachingMode::Normal);
+    }
+
+    #[test]
+    fn caching_modes_format_as_their_names() {
+        assert_eq!(std::format!("{}", CachingMode::Normal), "normal");
+        assert_eq!(std::format!("{}", CachingMode::WriteBack), "write-back");
+        assert_eq!(std::format!("{}", CachingMode::Uncached), "uncached");
+        assert_eq!(
+            std::format!("{}", CachingMode::WriteCombined),
+            "write-combined"
+        );
+        assert_eq!(
+            std::format!("{}", CachingMode::WriteThrough),
+            "write-through"
+        );
     }
 
     /// Formatted Unix-style, which is what the paging code prints.

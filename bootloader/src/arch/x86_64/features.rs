@@ -2,10 +2,12 @@
 
 use busyos::arch::x86_64::cpuid::CPUID;
 use busyos::arch::x86_64::cpuid::ExtendedFunction;
+use busyos::arch::x86_64::cpuid::FeatureInformation;
 use busyos::arch::x86_64::cpuid::StructuredExtendedFeature;
 use busyos::arch::x86_64::cr4::CR4;
 use busyos::arch::x86_64::msr::EFER;
 use busyos::arch::x86_64::msr::MSR;
+use busyos::arch::x86_64::paging::install_pat;
 
 #[derive(Debug)]
 pub struct Features;
@@ -23,6 +25,8 @@ impl crate::arch::generic::features::Features for Features {
     /// level.
     /// - `fsgsbase`: support for the `RDFSBASE`/`RDGSBASE`/`WRFSBASE`/`WRGSBASE`
     /// instructions.
+    /// - `pat`: support for the `IA32_PAT` MSR, which the caching mode of a
+    /// mapping is encoded against.
     fn activate() {
         // Check if `syscall`/`sysret` instructions are available
         let extended_function = unsafe { ExtendedFunction::read() };
@@ -64,5 +68,21 @@ impl crate::arch::generic::features::Features for Features {
         let mut cr4 = CR4::read();
         cr4.set_fsgsbase(true);
         unsafe { cr4.write() };
+
+        // Check if the `IA32_PAT` MSR is available
+        let feature_information = unsafe { FeatureInformation::read() };
+        if !feature_information.edx.pat() {
+            panic!("Required feature `pat` is not available");
+        }
+
+        // Install the memory types the kernel's caching modes name
+        //
+        // Like `EFER` above, this MSR is per core, so a core the bootloader
+        // has not brought up has to be given the same layout before it uses a
+        // mapping made with a caching mode of its own.
+        //
+        // Safety: `pat` was just checked, and the layout keeps the memory
+        // types of the slots the current mappings select.
+        unsafe { install_pat() };
     }
 }
