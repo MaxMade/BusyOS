@@ -3,6 +3,7 @@ pub mod bootinfo;
 pub mod cpu;
 pub mod cpuid;
 pub mod cr4;
+pub mod gdt;
 pub mod msr;
 pub mod paging;
 pub mod rflags;

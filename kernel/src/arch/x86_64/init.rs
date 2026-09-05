@@ -4,6 +4,7 @@ use crate::arch::CPUID;
 use crate::arch::Paging;
 use crate::arch::generic::cpu::CPU as _;
 use crate::arch::generic::paging::Paging as _;
+use crate::arch::x86_64::gdt::Gdt;
 use crate::core_local;
 use crate::kernel::bootinfo::BOOTINFO;
 use crate::kernel::core_local::{PerCPU, init_block_base};
@@ -127,21 +128,21 @@ pub extern "C" fn start() -> i32 {
     }
 
     // Setup kernel mapping
-    if cpu_id == BOOT_CPUID {
-        let (paging, t): (Paging<EarlyPageFrames>, Token<_, _, _>) =
-            match Paging::kernel_mapping(bootinfo, token) {
-                Ok((paging, t)) => (paging, t),
-                Err((error, _)) => panic!("Unable to setup kernel mapping: {}", error),
-            };
-        token = t;
-        unsafe { paging.activate() };
-    }
+    let (paging, t): (Paging<EarlyPageFrames>, Token<_, _, _>) =
+        match Paging::kernel_mapping(bootinfo, token) {
+            Ok((paging, t)) => (paging, t),
+            Err((error, _)) => panic!("Unable to setup kernel mapping: {}", error),
+        };
+    token = t;
+    unsafe { paging.activate() };
 
     // Prepare page frames
-    if cpu_id == BOOT_CPUID {
-        token = PageFrames::handover_from_early(token);
-        token = unsafe { PageFrames::init_from_bootinfo(token) };
-    }
+    token = PageFrames::handover_from_early(token);
+    token = unsafe { PageFrames::init_from_bootinfo(token) };
+
+    // Prepare GDT
+    token = unsafe { Gdt::init(token) };
+    token = unsafe { Gdt::load(token) };
 
     init_level.leave(token);
 
