@@ -9,5 +9,6 @@ pub mod paging;
 pub mod rflags;
 
 // The bootstrap stub belongs to the kernel image alone.
+pub mod idt;
 #[cfg(all(not(test), not(feature = "library")))]
 pub mod init;

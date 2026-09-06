@@ -1,7 +1,8 @@
 //! x86_64 implementation of the generic [`CPU`](crate::arch::generic::cpu::CPU)
 //! interface.
 
-use crate::arch::generic::cpu::InterruptFlag;
+use crate::arch::generic::cpu::{InterruptFlag, Register};
+use crate::arch::x86_64::gdt::SegmentSelector;
 use crate::arch::x86_64::rflags::RFLAGS;
 use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use core::num::TryFromIntError;
@@ -128,4 +129,248 @@ impl CPU {
             );
         }
     }
+}
+
+/// The x86_64 architectural exceptions, numbered by the vector the CPU
+/// raises them on.
+///
+/// Vectors without a variant here (`15`, `22`–`27`) are reserved by Intel/AMD
+/// and never raised.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exceptions {
+    DivisionError = 0,
+    Debug = 1,
+    NMI = 2,
+    Breakpoint = 3,
+    Overflow = 4,
+    BoundRangeExceeded = 5,
+    InvalidOpcode = 6,
+    DeviceNotAvailable = 7,
+    DoubleFault = 8,
+    CoprocessorSegmentOverrun = 9,
+    InvalidTSS = 10,
+    SegmentNotPresent = 11,
+    StackSegmentFault = 12,
+    GeneralProtectionFault = 13,
+    PageFault = 14,
+    #[allow(non_camel_case_types)]
+    x87FloatingPointException = 16,
+    AlignmentCheck = 17,
+    MachineCheck = 18,
+    SimdFloatingPointException = 19,
+    VirtualizationException = 20,
+    ControlProtectionException = 21,
+    HypervisorInjectionException = 28,
+    VmmCommunicationException = 29,
+    SecurityException = 30,
+}
+
+impl Display for Exceptions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Exceptions::DivisionError => write!(f, "Division Error"),
+            Exceptions::Debug => write!(f, "Debug Exception"),
+            Exceptions::NMI => write!(f, "Non-maskable Interrupt"),
+            Exceptions::Breakpoint => write!(f, "Breakpoint"),
+            Exceptions::Overflow => write!(f, "Overflow Exception"),
+            Exceptions::BoundRangeExceeded => write!(f, "Bound Range Exceeded"),
+            Exceptions::InvalidOpcode => write!(f, "Invalid Opcode"),
+            Exceptions::DeviceNotAvailable => write!(f, "Device not Available"),
+            Exceptions::DoubleFault => write!(f, "Double Fault"),
+            Exceptions::CoprocessorSegmentOverrun => write!(f, "Coprocessor Segment Overrun"),
+            Exceptions::InvalidTSS => write!(f, "Invalid TSS"),
+            Exceptions::SegmentNotPresent => write!(f, "Segment not Present"),
+            Exceptions::StackSegmentFault => write!(f, "Stack Segment Fault"),
+            Exceptions::GeneralProtectionFault => write!(f, "General Protection Fault"),
+            Exceptions::PageFault => write!(f, "Page Fault"),
+            Exceptions::x87FloatingPointException => write!(f, "x87 Floating Point Exception"),
+            Exceptions::AlignmentCheck => write!(f, "Alignment Check"),
+            Exceptions::MachineCheck => write!(f, "Machine Check"),
+            Exceptions::SimdFloatingPointException => write!(f, "Simd Floating-Point Exception"),
+            Exceptions::VirtualizationException => write!(f, "Virtualization Exception"),
+            Exceptions::ControlProtectionException => write!(f, "Control-Protection Exception"),
+            Exceptions::HypervisorInjectionException => write!(f, "Hypervisor-Injection Exception"),
+            Exceptions::VmmCommunicationException => write!(f, "VMM Communication Exception"),
+            Exceptions::SecurityException => write!(f, "Security Exception"),
+        }
+    }
+}
+
+/// x86_64's [`InterruptVector`](crate::arch::generic::cpu::InterruptVector):
+/// a vector number as the CPU and `entry.S` see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InterruptVector(u8);
+
+impl crate::arch::generic::cpu::InterruptVector for InterruptVector {
+    type Raw = u8;
+
+    fn into_raw(self) -> Self::Raw {
+        self.0
+    }
+
+    fn from_raw(raw: Self::Raw) -> Self {
+        Self(raw)
+    }
+
+    fn is_division_by_zero(&self) -> bool {
+        self.0 == Exceptions::DivisionError as _
+    }
+
+    fn is_breakpoint(&self) -> bool {
+        self.0 == Exceptions::Breakpoint as _
+    }
+
+    fn is_invalid_instruction(&self) -> bool {
+        self.0 == Exceptions::InvalidOpcode as _
+    }
+
+    fn is_page_fault(&self) -> bool {
+        self.0 == Exceptions::PageFault as _
+    }
+
+    fn is_invalid_alignmnet(&self) -> bool {
+        self.0 == Exceptions::AlignmentCheck as _
+    }
+}
+
+/// The state `entry.S` saves before calling [`__interrupt_handler`], in the
+/// order it lands on the stack.
+///
+/// `rip`/`cs`/`rflags`/`rsp`/`ss` are the frame the CPU itself pushes on any
+/// interrupt or exception; `error_code` and the general-purpose registers
+/// above it are pushed by `entry.S` (a `0` error code if the vector doesn't
+/// supply one, to keep every vector's frame the same shape).
+#[repr(C, packed)]
+pub struct InterruptStackFrame {
+    /// `%rax` registers.
+    rax: u64,
+
+    /// `%rcx` registers.
+    rcx: u64,
+
+    /// `%rdx` registers.
+    rdx: u64,
+
+    /// `%rsi` registers.
+    rsi: u64,
+
+    /// `%rdi` registers.
+    rdi: u64,
+
+    /// `%r8` registers.
+    r8: u64,
+
+    /// `%r9` registers.
+    r9: u64,
+
+    /// `%r10` registers.
+    r10: u64,
+
+    /// `%r11` registers.
+    r11: u64,
+
+    // Interrupt-related error (`0` for compatibility).
+    error_code: u64,
+
+    /// Instruction pointer.
+    rip: u64,
+    /// Code segment descriptor.
+    cs: u64,
+    /// Flags register.
+    rflags: u64,
+    /// Stack pointer.
+    rsp: u64,
+    /// Stack segment descriptor.
+    ss: u64,
+}
+
+impl InterruptStackFrame {
+    /// The code segment the interrupted context ran under.
+    ///
+    /// # Panics
+    ///
+    /// If `cs` is neither [`KERNEL_CODE`](SegmentSelector::KERNEL_CODE) nor
+    /// [`USER_CODE`](SegmentSelector::USER_CODE) — the only two selectors
+    /// `entry.S`'s `swapgs` handling accounts for.
+    pub const fn cs(&self) -> SegmentSelector {
+        let cs = SegmentSelector::from_bits(self.cs as _);
+        assert!(
+            cs.into_bits() == SegmentSelector::KERNEL_CODE.into_bits()
+                || cs.into_bits() == SegmentSelector::USER_CODE.into_bits()
+        );
+        cs
+    }
+
+    /// The stack segment the interrupted context ran under.
+    ///
+    /// # Panics
+    ///
+    /// If `ss` is neither [`KERNEL_DATA`](SegmentSelector::KERNEL_DATA) nor
+    /// [`USER_DATA`](SegmentSelector::USER_DATA).
+    pub const fn ss(&self) -> SegmentSelector {
+        let ss = SegmentSelector::from_bits(self.ss as _);
+        assert!(
+            ss.into_bits() == SegmentSelector::KERNEL_DATA.into_bits()
+                || ss.into_bits() == SegmentSelector::USER_DATA.into_bits()
+        );
+        ss
+    }
+
+    /// The flags register at the point of interruption.
+    pub const fn rflags(&self) -> RFLAGS {
+        RFLAGS::from_bits(self.rflags)
+    }
+}
+
+impl crate::arch::generic::cpu::InterruptStackFrame for InterruptStackFrame {
+    type RawRegister = u64;
+
+    type ErrorCode = u64;
+
+    fn get_sp(&self) -> Register<Self::RawRegister> {
+        Register::<Self::RawRegister>::from_raw(self.rsp)
+    }
+
+    fn set_sp(&mut self, sp: Register<Self::RawRegister>) {
+        self.rsp = sp.into_raw();
+    }
+
+    fn get_ip(&self) -> Register<Self::RawRegister> {
+        Register::<Self::RawRegister>::from_raw(self.rip)
+    }
+
+    fn set_ip(&mut self, ip: Register<Self::RawRegister>) {
+        self.rip = ip.into_raw();
+    }
+
+    fn get_ret(&self) -> Register<Self::RawRegister> {
+        Register::<Self::RawRegister>::from_raw(self.rax)
+    }
+
+    fn set_ret(&mut self, ret: Register<Self::RawRegister>) {
+        self.rax = ret.into_raw();
+    }
+
+    fn get_error(&self) -> Self::ErrorCode {
+        self.error_code
+    }
+}
+
+/// Entry point every `entry.S` stub calls into after saving state.
+///
+/// `vector` is the vector number the stub was generated for; `state` is the
+/// [`InterruptStackFrame`] it just built on the current stack.
+///
+/// # Safety (from the caller's side)
+///
+/// Must only be called by an `entry.S` stub, immediately after it has pushed
+/// a complete [`InterruptStackFrame`] and with `state` pointing at it.
+#[unsafe(no_mangle)]
+extern "C" fn __interrupt_handler(vector: u64, state: *mut InterruptStackFrame) {
+    // TODO(@MaxMade): dispatch on `vector`/`state` instead of discarding them.
+    let _vector = vector;
+    let _state = unsafe { state.as_mut() };
+
+    todo!();
 }

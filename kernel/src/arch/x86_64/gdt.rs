@@ -861,6 +861,64 @@ impl Gdt {
     }
 }
 
+/// A value loaded into a segment register (`cs`, `ss`, ...): which GDT
+/// descriptor to use, and at what privilege.
+///
+/// Sixteen bits wide, matching the segment registers it is loaded into.
+#[bitfield(u16)]
+#[derive(PartialEq, Eq)]
+pub struct SegmentSelector {
+    /// Requested Privilege Level (bits [1:0]).
+    ///
+    /// The privilege level the selector is requested at. When loading `cs`,
+    /// the RPL must match the code segment descriptor's DPL (via a call
+    /// gate) or the current CPL. For data segments, the effective privilege
+    /// used for access checks is `max(RPL, CPL)`.
+    #[bits(2)]
+    pub rpl: u8,
+
+    /// Table Indicator (bit 2).
+    ///
+    /// `false` = GDT, `true` = LDT. BusyOS does not use an LDT, so this
+    /// should always be `false`.
+    #[bits(1)]
+    pub table_indicator: bool,
+
+    /// Index (bits [15:3]).
+    ///
+    /// The index of the descriptor within the GDT (or LDT), counted in
+    /// units of 8-byte descriptor slots — NOT a byte offset. To get the
+    /// byte offset into the table, multiply by 8 (equivalent to this
+    /// field already being pre-shifted into the selector's bit position).
+    #[bits(13)]
+    pub index: u16,
+}
+
+impl SegmentSelector {
+    /// A selector for the GDT descriptor at `index`, requested at `rpl`.
+    pub const fn create(index: u16, rpl: Ring) -> Self {
+        Self::new()
+            .with_index(index)
+            .with_table_indicator(false)
+            .with_rpl(rpl as u8)
+    }
+
+    /// The kernel code segment: [`Gdt`]'s descriptor 1, ring 0.
+    pub const KERNEL_CODE: Self = Self::create(1, Ring::Zero);
+
+    /// The kernel data segment: [`Gdt`]'s descriptor 2, ring 0.
+    pub const KERNEL_DATA: Self = Self::create(2, Ring::Zero);
+
+    /// The user data segment: [`Gdt`]'s descriptor 4, ring 3.
+    ///
+    /// Descriptor 3, the 32-bit compatibility code segment, has no selector
+    /// here — BusyOS runs no compatibility-mode code.
+    pub const USER_DATA: Self = Self::create(4, Ring::Three);
+
+    /// The user code segment: [`Gdt`]'s descriptor 5, ring 3.
+    pub const USER_CODE: Self = Self::create(5, Ring::Three);
+}
+
 #[cfg(test)]
 mod test {
     use crate::{

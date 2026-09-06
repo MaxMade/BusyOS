@@ -14,6 +14,7 @@ fn main() {
             println!("cargo:rerun-if-changed={arch_dir}/kernel.ld");
 
             assemble(&arch_dir, "head.S");
+            assemble(&arch_dir, "entry.S");
         }
     }
 }
