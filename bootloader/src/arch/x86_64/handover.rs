@@ -1,13 +1,16 @@
 use core::ffi::c_void;
 
 use busyos::{
-    arch::CPU,
-    arch::generic::paging::{Paging as _, VirtualAddress},
+    arch::{
+        CPU,
+        generic::paging::{Paging as _, PhysicalAddress, VirtualAddress},
+    },
     kernel::{
         bootinfo::Bootinfo,
         locking::{CanAcquire, PreviousToken, level::Epilogue},
     },
 };
+use uefi::table::cfg::ConfigTableEntry;
 
 use crate::paging::Paging;
 
@@ -37,6 +40,24 @@ impl crate::arch::generic::handover::HandOver for HandOver {
 
         // Save value of UEFI's `gs` register
         bootinfo.arch_bootinfo.gs = unsafe { CPU::gs_base() };
+
+        // Save address of RSDP
+        let rsdp = uefi::system::with_config_table(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.guid == ConfigTableEntry::ACPI2_GUID)
+                .or_else(|| {
+                    entries
+                        .iter()
+                        .find(|entry| entry.guid == ConfigTableEntry::ACPI_GUID)
+                })
+                .map(|entry| PhysicalAddress::new(entry.address as _))
+        });
+
+        bootinfo.arch_bootinfo.rsdp = match rsdp {
+            Some(rsdp) => rsdp,
+            None => panic!("Unable to find RSDP"),
+        };
 
         // Save the address of `_start` symbol
         let entry = bootinfo.kernel_start_symbol;

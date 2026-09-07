@@ -20,6 +20,9 @@ pub struct Bootinfo {
 
     /// Base address of x86_64's `gs` segment used by UEFI.
     pub gs: usize,
+
+    /// APCI Root System Description Pointer.
+    pub rsdp: PhysicalAddress<c_void>,
 }
 
 impl Default for Bootinfo {
@@ -29,6 +32,7 @@ impl Default for Bootinfo {
             uefi_gdt: PhysicalAddress::new(ptr::null_mut()),
             uefi_idt: PhysicalAddress::new(ptr::null_mut()),
             gs: 0,
+            rsdp: PhysicalAddress::new(ptr::null_mut()),
         }
     }
 }
