@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "bootloader",
-    "kernel",
+    "kernel", "xtask",
 ]
 resolver = "2"
 
