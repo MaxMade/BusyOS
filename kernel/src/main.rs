@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), no_main)]
 
 pub mod arch;
+pub mod driver;
 pub mod kernel;
 pub mod mem;
 pub mod user;

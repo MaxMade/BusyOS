@@ -8,7 +8,6 @@
 //! once and shared, while every core points its own `IDTR` at it.
 
 use core::arch::asm;
-use core::mem::MaybeUninit;
 
 use bitfield_struct::bitfield;
 

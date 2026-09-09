@@ -69,6 +69,11 @@ SECTIONS
          */
         KEEP(*(.text.boot))
 
+        /*
+         * Registered driver module for automatic initialization.
+         */
+        KEEP(*(SORT_BY_NAME(.init.modules.text.*)))
+
         *(.text .text.*)
         *(.gnu.linkonce.t.*)
 
@@ -80,6 +85,13 @@ SECTIONS
     .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_VMA_START + KERNEL_PHYS_BASE)
     {
         _rodata_start = .;
+
+        /*
+         * Registered driver module callbacks for automatic initialization.
+         */
+        __init_modules_callbacks_start = .;
+        KEEP(*(SORT_BY_NAME(.init.modules.rodata.*)))
+        __init_modules_callbacks_end = .;
 
         *(.rodata .rodata.*)
         *(.gnu.linkonce.r.*)

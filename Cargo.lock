@@ -112,6 +112,7 @@ dependencies = [
  "arch_generic_derive",
  "bitfield-struct",
  "busyos",
+ "driver_macro",
  "kernel_derive",
  "nix",
 ]
@@ -221,6 +222,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "driver_macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

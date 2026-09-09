@@ -7,6 +7,7 @@ edition = "2024"
 [dependencies]
 kernel_derive = { path = "src/kernel/derive" }
 arch_generic_derive = { path = "src/arch/generic/derive" }
+driver_macro = { path = "src/driver/macro" }
 bitfield-struct = { version = "0.13.0", default-features = false }
 
 [dev-dependencies]

@@ -7,6 +7,7 @@ use crate::arch::generic::paging::Paging as _;
 use crate::arch::x86_64::gdt::Gdt;
 use crate::arch::x86_64::idt::Idt;
 use crate::core_local;
+use crate::driver::module::Modules;
 use crate::kernel::bootinfo::BOOTINFO;
 use crate::kernel::core_local::{PerCPU, init_block_base};
 use crate::kernel::locking::InitLevel;
@@ -148,6 +149,9 @@ pub extern "C" fn start() -> i32 {
     // Prepare IDT
     token = unsafe { Idt::init(token) };
     token = unsafe { Idt::load(token) };
+
+    // Initialise modules
+    token = Modules::init(token);
 
     init_level.leave(token);
 
