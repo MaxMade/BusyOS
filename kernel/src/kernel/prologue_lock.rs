@@ -102,6 +102,28 @@ where
         PrologueWriteGuard { lock: self, state }
     }
 
+    /// Exclusive access with interrupts disabled, if the lock is free.
+    ///
+    /// On success, the guard of [`acquire`](PrologueLock::acquire); on
+    /// failure, the caller's own token back, with the interrupt state it
+    /// came with restored.
+    pub fn try_acquire<From>(&self, token: From) -> Result<PrologueWriteGuard<'_, T, L, From>, From>
+    where
+        From: CanAcquire<level::Prologue> + PreviousToken,
+    {
+        // Interrupts go off before the attempt for the same reason as in
+        // `acquire`, and back on again if the attempt comes up empty.
+        let state = CPU::disable_interrupts(token);
+
+        // SAFETY: as in `acquire`; on success the matching `raw_unlock`
+        // happens in `release`, on failure nothing was acquired.
+        if unsafe { self.raw.raw_try_lock() } {
+            Ok(PrologueWriteGuard { lock: self, state })
+        } else {
+            Err(CPU::restore_interrupts(state))
+        }
+    }
+
     /// Shared access with interrupts disabled.
     ///
     /// Disables interrupts first, then acquires the lock. The caller's token
@@ -119,6 +141,30 @@ where
         unsafe { self.raw.raw_lock_shared() };
 
         PrologueReadGuard { lock: self, state }
+    }
+
+    /// Shared access with interrupts disabled, if no writer holds the lock.
+    ///
+    /// On success, the guard of
+    /// [`acquire_shared`](PrologueLock::acquire_shared); on failure, the
+    /// caller's own token back, with the interrupt state it came with
+    /// restored.
+    pub fn try_acquire_shared<From>(
+        &self,
+        token: From,
+    ) -> Result<PrologueReadGuard<'_, T, L, From>, From>
+    where
+        From: CanAcquire<level::Prologue> + PreviousToken,
+    {
+        // See `try_acquire` for why the order matters.
+        let state = CPU::disable_interrupts(token);
+
+        // SAFETY: as in `acquire_shared`; on failure nothing was acquired.
+        if unsafe { self.raw.raw_try_lock_shared() } {
+            Ok(PrologueReadGuard { lock: self, state })
+        } else {
+            Err(CPU::restore_interrupts(state))
+        }
     }
 }
 

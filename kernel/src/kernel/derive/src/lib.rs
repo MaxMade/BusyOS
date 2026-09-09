@@ -386,12 +386,24 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
             /// # Safety
             /// Only via [`HierarchicalLockExt::acquire`].
             unsafe fn raw_lock(&self);
+            /// Attempt to lock exclusively without blocking. Returns whether
+            /// the lock was taken; on `false` nothing was acquired.
+            ///
+            /// # Safety
+            /// Only via [`HierarchicalLockExt::try_acquire`].
+            unsafe fn raw_try_lock(&self) -> bool;
             /// # Safety
             /// Only via [`HierarchicalLockExt::release`].
             unsafe fn raw_unlock(&self);
             /// # Safety
             /// Only via [`HierarchicalLockExt::acquire_shared`].
             unsafe fn raw_lock_shared(&self);
+            /// Attempt to lock in shared mode without blocking. Returns
+            /// whether the lock was taken; on `false` nothing was acquired.
+            ///
+            /// # Safety
+            /// Only via [`HierarchicalLockExt::try_acquire_shared`].
+            unsafe fn raw_try_lock_shared(&self) -> bool;
             /// # Safety
             /// Only via [`HierarchicalLockExt::release_shared`].
             unsafe fn raw_unlock_shared(&self);
@@ -411,6 +423,20 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
             where
                 From: CanAcquire<<Self::Id as LockId>::Level>;
 
+            /// Acquire exclusively if the lock is free, consuming the
+            /// incoming token.
+            ///
+            /// On success the token is replaced by the target-level one, as
+            /// in [`acquire`](HierarchicalLockExt::acquire). On failure the
+            /// incoming token is handed back untouched, so the caller keeps
+            /// exactly the capability it came with.
+            fn try_acquire<From>(
+                &self,
+                token: From,
+            ) -> Result<Token<Self::Id, From, Exclusive>, From>
+            where
+                From: CanAcquire<<Self::Id as LockId>::Level>;
+
             /// Release, recovering the previous token.
             ///
             /// Only accepts tokens produced by a lock with the same `Id`.
@@ -426,6 +452,19 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
                 &self,
                 token: From,
             ) -> Token<Self::Id, From, Shared<Z>>
+            where
+                From: CanAcquire<<Self::Id as LockId>::Level>;
+
+            /// Acquire in shared mode if no writer holds the lock,
+            /// consuming the incoming token.
+            ///
+            /// On success the nested-hold count starts at zero, as in
+            /// [`acquire_shared`](HierarchicalLockExt::acquire_shared). On
+            /// failure the incoming token is handed back untouched.
+            fn try_acquire_shared<From>(
+                &self,
+                token: From,
+            ) -> Result<Token<Self::Id, From, Shared<Z>>, From>
             where
                 From: CanAcquire<<Self::Id as LockId>::Level>;
 
@@ -472,6 +511,24 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
                 }
             }
 
+            fn try_acquire<From>(
+                &self,
+                token: From,
+            ) -> Result<Token<Self::Id, From, Exclusive>, From>
+            where
+                From: CanAcquire<<Self::Id as LockId>::Level>,
+            {
+                // SAFETY: hierarchy proven by the token passed in; a token is
+                // forged only when the lock was actually taken.
+                if unsafe { self.raw_try_lock() } {
+                    Ok(unsafe { Token::forge() })
+                } else {
+                    // Nothing was acquired, so the caller stays where it was:
+                    // hand its own token straight back.
+                    Err(token)
+                }
+            }
+
             fn release<P: PreviousToken>(
                 &self,
                 _token: Token<Self::Id, P, Exclusive>,
@@ -495,6 +552,21 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
                 unsafe {
                     self.raw_lock_shared();
                     Token::forge()
+                }
+            }
+
+            fn try_acquire_shared<From>(
+                &self,
+                token: From,
+            ) -> Result<Token<Self::Id, From, Shared<Z>>, From>
+            where
+                From: CanAcquire<<Self::Id as LockId>::Level>,
+            {
+                // SAFETY: as in `try_acquire`, shared mode, count zero.
+                if unsafe { self.raw_try_lock_shared() } {
+                    Ok(unsafe { Token::forge() })
+                } else {
+                    Err(token)
                 }
             }
 
@@ -601,6 +673,22 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
                 (WriteGuard { lock: self }, token)
             }
 
+            /// Exclusive access if the lock is free.
+            ///
+            /// On success, the `(guard, token)` pair of
+            /// [`acquire`](Lock::acquire); on failure, the caller's own
+            /// token back, unchanged.
+            pub fn try_acquire<From>(
+                &self,
+                token: From,
+            ) -> Result<(WriteGuard<'_, T, L>, Token<L::Id, From, Exclusive>), From>
+            where
+                From: CanAcquire<<L::Id as LockId>::Level>,
+            {
+                let token = HierarchicalLockExt::try_acquire(&self.raw, token)?;
+                Ok((WriteGuard { lock: self }, token))
+            }
+
             /// Shared access. The nested-hold count starts at zero.
             ///
             /// Returns the data guard and the target-level token as a pair.
@@ -614,6 +702,22 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
             {
                 let token = HierarchicalLockExt::acquire_shared(&self.raw, token);
                 (ReadGuard { lock: self }, token)
+            }
+
+            /// Shared access if no writer holds the lock.
+            ///
+            /// On success, the `(guard, token)` pair of
+            /// [`acquire_shared`](Lock::acquire_shared); on failure, the
+            /// caller's own token back, unchanged.
+            pub fn try_acquire_shared<From>(
+                &self,
+                token: From,
+            ) -> Result<(ReadGuard<'_, T, L>, Token<L::Id, From, Shared<Z>>), From>
+            where
+                From: CanAcquire<<L::Id as LockId>::Level>,
+            {
+                let token = HierarchicalLockExt::try_acquire_shared(&self.raw, token)?;
+                Ok((ReadGuard { lock: self }, token))
             }
 
             /// Additional shared access alongside an existing shared hold.
