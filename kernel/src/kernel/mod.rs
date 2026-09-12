@@ -9,6 +9,7 @@ pub mod btreeset;
 pub mod core_local;
 pub mod linked_list;
 pub mod locking;
+pub mod printk;
 pub mod prologue_lock;
 pub mod spinlock;
 pub mod ticketlock;

@@ -13,6 +13,8 @@ use crate::kernel::core_local::{PerCPU, init_block_base};
 use crate::kernel::locking::InitLevel;
 use crate::kernel::locking::RootToken;
 use crate::kernel::locking::Token;
+use crate::kernel::printk;
+use crate::kernel::printk::LogLevel;
 use crate::mem::heap::Heap;
 use crate::mem::page_frames::EarlyPageFrames;
 use crate::mem::page_frames::PageFrames;
@@ -149,6 +151,10 @@ pub extern "C" fn start() -> i32 {
     // Prepare IDT
     token = unsafe { Idt::init(token) };
     token = unsafe { Idt::load(token) };
+
+    // Prepare printk!
+    token = printk::init(LogLevel::Info, token);
+    crate::printkln!(LogLevel::Info, "BusyOS Kernel");
 
     // Initialise modules
     token = Modules::init(token);
