@@ -3,7 +3,10 @@
 use core::ffi::c_void;
 use core::ptr;
 
-use crate::arch::{CR3, generic::paging::PhysicalAddress};
+use crate::{
+    arch::{CR3, generic::paging::PhysicalAddress},
+    driver::acpi::rsdp::RSDP,
+};
 
 /// x86_64-specific boot information
 #[repr(C)]
@@ -21,8 +24,11 @@ pub struct Bootinfo {
     /// Base address of x86_64's `gs` segment used by UEFI.
     pub gs: usize,
 
-    /// APCI Root System Description Pointer.
-    pub rsdp: PhysicalAddress<c_void>,
+    /// Physical address of the ACPI Root System Description Pointer.
+    ///
+    /// Located by the bootloader and validated by the ACPI driver, see
+    /// [`RSDP::verify`].
+    pub rsdp: PhysicalAddress<RSDP>,
 }
 
 impl Default for Bootinfo {
