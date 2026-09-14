@@ -1,5 +1,5 @@
 [package]
-name = "busyos_bootloader"
+name = "busyos-bootloader"
 version = "0.1.0"
 authors = ["Maxmade <28571007+MaxMade@users.noreply.github.com>"]
 edition = "2024"
