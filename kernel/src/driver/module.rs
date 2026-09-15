@@ -19,7 +19,7 @@ unsafe extern "C" {
 }
 
 impl Modules {
-    pub fn register<Token>(token: Token, module: Arc<dyn Module>) -> Result<Token, (Errno, Token)>
+    pub fn register<Token>(module: Arc<dyn Module>, token: Token) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {

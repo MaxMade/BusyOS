@@ -63,6 +63,28 @@ where
     }
 }
 
+/// CPUID leaf `0x00000001` ECX — feature information.
+///
+/// Only the bits the kernel acts on are named; the rest are left unnamed
+/// rather than described, since nothing reads them.
+#[bitfield(u32)]
+pub struct FeatureInformationECX {
+    /// Reserved/Unused (bits [20:0]).
+    #[bits(21)]
+    __: u32,
+
+    /// x2APIC Support (`X2APIC`, bit 21).
+    ///
+    /// When set, the processor supports the x2APIC capability and can be placed
+    /// into the x2APIC mode.
+    #[bits(1, access = RO)]
+    pub x2apic: bool,
+
+    /// Reserved/Unused (bits [31:22]).
+    #[bits(10)]
+    __: u16,
+}
+
 /// CPUID leaf `0x00000001` EDX — feature information.
 ///
 /// Only the bits the kernel acts on are named; the rest are left unnamed
@@ -90,13 +112,14 @@ pub struct FeatureInformationEDX {
 ///
 /// Provides processor signature and feature information.
 ///
-/// Note: EAX (processor signature), EBX (brand index, `CLFLUSH` size, local
-/// APIC id) and ECX are exposed as raw `u32` values since their sub-fields are
-/// not required for feature detection.
+/// Note: EAX (processor signature) and EBX (brand index, `CLFLUSH` size, local
+/// APIC id) are exposed as raw `u32` values since their sub-fields are not
+/// required for feature detection.
 pub struct FeatureInformation {
     eax: u32,
     ebx: u32,
-    ecx: u32,
+    /// Feature Information `ecx` register.
+    pub ecx: FeatureInformationECX,
     /// Feature Information `edx` register.
     pub edx: FeatureInformationEDX,
 }
@@ -111,7 +134,7 @@ impl CPUID<0x00000001, 0x0> for FeatureInformation {
     }
 
     fn ecx(&self) -> u32 {
-        self.ecx
+        self.ecx.into_bits()
     }
 
     fn edx(&self) -> u32 {
@@ -122,7 +145,7 @@ impl CPUID<0x00000001, 0x0> for FeatureInformation {
         Self {
             eax,
             ebx,
-            ecx,
+            ecx: FeatureInformationECX::from_bits(ecx),
             edx: FeatureInformationEDX::from_bits(edx),
         }
     }

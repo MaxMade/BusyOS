@@ -27,6 +27,7 @@ impl crate::arch::generic::features::Features for Features {
     /// instructions.
     /// - `pat`: support for the `IA32_PAT` MSR, which the caching mode of a
     /// mapping is encoded against.
+    /// - `x2apic`: support for the x2APIC mode.
     fn activate() {
         // Check if `syscall`/`sysret` instructions are available
         let extended_function = unsafe { ExtendedFunction::read() };
@@ -73,6 +74,11 @@ impl crate::arch::generic::features::Features for Features {
         let feature_information = unsafe { FeatureInformation::read() };
         if !feature_information.edx.pat() {
             panic!("Required feature `pat` is not available");
+        }
+
+        // Check if the `x2APIC` mode is available
+        if !feature_information.ecx.x2apic() {
+            panic!("Required feature `x2apic` is not available");
         }
 
         // Install the memory types the kernel's caching modes name

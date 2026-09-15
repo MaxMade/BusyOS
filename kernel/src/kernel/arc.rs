@@ -35,9 +35,9 @@
 use core::alloc::Layout;
 use core::borrow::Borrow;
 use core::fmt;
-use core::marker::PhantomData;
+use core::marker::{PhantomData, Unsize};
 use core::mem::ManuallyDrop;
-use core::ops::Deref;
+use core::ops::{CoerceUnsized, Deref};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering, fence};
 
@@ -109,6 +109,14 @@ unsafe impl<T, A> Sync for Arc<T, A>
 where
     T: ?Sized + Send + Sync,
     A: Allocator<MemoryManagementLevelID> + Send + Sync,
+{
+}
+
+impl<T, U, A> CoerceUnsized<Arc<U, A>> for Arc<T, A>
+where
+    T: ?Sized + Unsize<U>,
+    U: ?Sized,
+    A: Allocator<MemoryManagementLevelID>,
 {
 }
 

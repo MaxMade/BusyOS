@@ -23,9 +23,9 @@
 use core::alloc::Layout;
 use core::borrow::{Borrow, BorrowMut};
 use core::fmt;
-use core::marker::PhantomData;
+use core::marker::{PhantomData, Unsize};
 use core::mem::ManuallyDrop;
-use core::ops::{Deref, DerefMut};
+use core::ops::{CoerceUnsized, Deref, DerefMut};
 use core::ptr::{self, NonNull};
 
 use crate::{
@@ -73,6 +73,14 @@ unsafe impl<T, A> Sync for Box<T, A>
 where
     T: ?Sized + Sync,
     A: Allocator<MemoryManagementLevelID> + Sync,
+{
+}
+
+impl<T, U, A> CoerceUnsized<Box<U, A>> for Box<T, A>
+where
+    T: ?Sized + Unsize<U>,
+    U: ?Sized,
+    A: Allocator<MemoryManagementLevelID>,
 {
 }
 

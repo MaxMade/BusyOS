@@ -17,8 +17,11 @@ use core::{fmt::Display, slice};
 use driver_macro::module;
 
 use crate::arch::generic::paging::ReversePaging;
+use crate::driver::acpi::madt::MADT;
 use crate::driver::acpi::rsdp::RSDP;
 use crate::driver::acpi::xsdt::XSDT;
+use crate::driver::module::Modules;
+use crate::kernel::arc::Arc;
 use crate::{
     arch::Paging,
     driver::module::Module,
@@ -29,6 +32,12 @@ use crate::{
     mem::page_frames::PageFrames,
     user::errno::Errno,
 };
+
+#[cfg(target_arch = "x86_64")]
+use crate::driver::x86_64::x2apic::LapicID;
+
+#[cfg(target_arch = "x86_64")]
+use crate::kernel::linked_list::LinkedList;
 
 module! {
     name: "acpi",
@@ -41,7 +50,16 @@ module! {
 /// Registered through the [`module!`] macro and initialized by the kernel's
 /// module framework. See the [`Module`] implementation for what happens during
 /// initialization.
-pub struct Acpi {}
+pub struct Acpi {
+    /// The local APIC identifier of every core the firmware reported through
+    /// the [`MADT`], collected during [`init`](Module::init).
+    ///
+    /// This is what tells the kernel how many cores exist and how to address
+    /// each of them, so it is the starting point for bringing up the
+    /// secondary cores later on.
+    #[cfg(target_arch = "x86_64")]
+    x2apic_lapic_ids: LinkedList<LapicID>,
+}
 
 /// The four-character signature identifying an ACPI table.
 ///
@@ -53,6 +71,10 @@ pub struct Acpi {}
 pub enum Signature {
     /// *Extended System Description Table*, see [`XSDT`].
     XSDT = u32::from_ne_bytes([b'X', b'S', b'D', b'T']),
+
+    /// *Multiple APIC Description Table*, see [`MADT`]. Signed `APIC` rather
+    /// than `MADT`, since the table predates the name it is known by.
+    MADT = u32::from_ne_bytes([b'A', b'P', b'I', b'C']),
 }
 
 impl Signature {
@@ -188,16 +210,28 @@ impl Module for Acpi {
     /// locate the XSDT. The XSDT is validated in turn and its entries are then
     /// iterated to discover the remaining tables.
     ///
+    /// Each entry is offered to every table type the kernel knows about; a
+    /// table whose signature or checksum does not match is simply not
+    /// recognized by that type, so an unknown table is skipped rather than
+    /// rejected. On `x86_64` the [`MADT`] is the only table interpreted so
+    /// far, and only for the local APIC identifiers it reports.
+    ///
     /// # Panics
     ///
     /// Panics if the boot information does not contain a valid RSDP, or if the
     /// XSDT it refers to fails validation. Both indicate firmware that the
     /// kernel cannot make sense of, so there is nothing to fall back to.
-    fn init<Token>(_: Token) -> Result<Token, (Errno, Token)>
+    fn init<Token>(token: Token) -> Result<Token, (Errno, Token)>
     where
         Self: Sized,
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
+        let mut token = token;
+
+        let mut acpi = Acpi {
+            x2apic_lapic_ids: LinkedList::new(),
+        };
+
         let boot_info = unsafe { BOOTINFO.assume_init_ref() };
 
         // Parse Root System Descriptor Pointer (RSDP)
@@ -217,8 +251,62 @@ impl Module for Acpi {
 
         for table in xsdt.tables() {
             let table_ptr = unsafe { Paging::<PageFrames>::phys_to_virt(table) };
+
+            // Try to interpret as Multiple APIC Description Table (MADT)
+            if let Some(madt) = MADT::verify_header(table_ptr.as_ptr()) {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    // Collect x2apic LAPIC IDs
+                    token = madt.x2apic_lapic_ids(&mut acpi, token);
+                }
+            }
         }
 
-        todo!();
+        // Register driver
+        let driver;
+        (driver, token) = match Arc::try_new(acpi, token) {
+            Ok(success) => success,
+            Err((error, _)) => {
+                panic!("Unable to create sharable ACPI driver instance: {}", error);
+            }
+        };
+        token = match Modules::register(driver, token) {
+            Ok(token) => token,
+            Err((error, _)) => {
+                panic!("Unable to register ACPI driver instance: {}", error);
+            }
+        };
+
+        Ok(token)
+    }
+}
+
+impl Acpi {
+    /// Records the local APIC identifier of one core.
+    ///
+    /// Called once per *Processor Local x2APIC* record while the [`MADT`] is
+    /// walked, see [`MADT::x2apic_lapic_ids`]. The identifiers are kept in the
+    /// order the firmware listed them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the identifier cannot be stored. This only happens if the
+    /// allocation fails, and a kernel that cannot afford one node per core
+    /// this early during boot has no way to continue.
+    #[cfg(target_arch = "x86_64")]
+    pub fn register_x2apic_lapic_id<Token>(&mut self, lapic_id: LapicID, token: Token) -> Token
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        let mut token = token;
+
+        token = match self.x2apic_lapic_ids.try_push_back(lapic_id, token) {
+            Ok(token) => token,
+            Err((error, _)) => {
+                panic!("Unable to register x2apic LAPIC ID: {}", error);
+            }
+        };
+
+        token
     }
 }
