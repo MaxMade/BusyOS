@@ -1,6 +1,7 @@
 use crate::kernel::locking::PreviousToken;
 use core::fmt::{Debug, Display};
 use core::fmt::{LowerHex, UpperHex};
+use core::hash::Hash;
 use core::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Shl, Shr, Sub};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,8 +74,15 @@ pub trait CPU {
 /// assigns it.
 pub trait InterruptVector
 where
-    Self: Debug + Clone + Copy + PartialEq + Eq,
+    Self: Debug + Clone + Copy + PartialEq + Eq + Hash,
 {
+    /// How many vectors the architecture has.
+    ///
+    /// Every vector number is below this, so a table with one slot per vector
+    /// can be sized from it at compile time and indexed with
+    /// [`into_raw`](Self::into_raw) without a bounds check of its own.
+    const MAX_NUM: usize;
+
     /// The architecture's native representation of a vector number.
     type Raw: PartialEq + Eq;
 

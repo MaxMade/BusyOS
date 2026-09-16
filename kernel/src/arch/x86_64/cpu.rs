@@ -199,10 +199,13 @@ impl Display for Exceptions {
 
 /// x86_64's [`InterruptVector`](crate::arch::generic::cpu::InterruptVector):
 /// a vector number as the CPU and `entry.S` see it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InterruptVector(u8);
 
 impl crate::arch::generic::cpu::InterruptVector for InterruptVector {
+    /// The IDT holds 256 gates, and a vector is the `u8` that indexes it.
+    const MAX_NUM: usize = 256;
+
     type Raw = u8;
 
     fn into_raw(self) -> Self::Raw {

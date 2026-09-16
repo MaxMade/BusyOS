@@ -19,7 +19,24 @@ unsafe extern "C" {
 }
 
 impl Modules {
-    pub fn register<Token>(module: Arc<dyn Module>, token: Token) -> Result<Token, (Errno, Token)>
+    /// Adds `module` to the list every later pass over the drivers walks.
+    ///
+    /// Generic over the concrete module instead of taking an `Arc<dyn Module>`,
+    /// so that a caller registers the `Arc<Driver>` it already holds and keeps
+    /// using it afterwards. The unsizing to `dyn` happens here.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::ENOMEM`] if the list could not grow. The list is unchanged in
+    /// that case.
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned in both arms.
+    pub fn register<Token, Driver: 'static + Module>(
+        module: Arc<Driver>,
+        token: Token,
+    ) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
