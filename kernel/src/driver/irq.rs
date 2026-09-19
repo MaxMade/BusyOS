@@ -7,78 +7,59 @@
 //! delivers the vector, and it is what a driver goes through to have its own
 //! vector masked or unmasked.
 //!
-//! Handling a vector is split in two. The prologue runs in interrupt context
-//! under a [`PrologueToken`], does only what cannot wait, and reports whether
-//! the rest is needed. The epilogue then runs under an [`EpilogueToken`], from
-//! a level that may still take the driver's own locks.
+//! Handling a vector is split in two. The prologue runs in interrupt context,
+//! does only what cannot wait, and reports whether the rest is needed. The
+//! epilogue then runs from a level that may still take the driver's own
+//! locks.
 
 use crate::{
     arch::{InterruptVector, generic::cpu::InterruptVector as GenericInterruptVector},
     driver::module::Module,
     kernel::{
-        arc::Arc,
         locking::{
             CanAcquire, DriverLevelID, EpilogueLevelID, LockId, MemoryManagementLevelID,
-            PreviousToken, PrologueLevelID, RootToken, Shared, Token,
+            PreviousToken, PrologueLevelID,
         },
         ticketlock::{PrologueRWTicketlock, RWTicketlock},
     },
     user::errno::Errno,
 };
 
-/// The token the driver-level calls of a registered [`IRQCapable`] run under.
-///
-/// What `EpilogueLevel::enter` hands out, which is above the `Driver` level and
-/// may therefore acquire a driver's own locks.
-pub type DriverToken = Token<EpilogueLevelID, RootToken, Shared>;
-
-/// The token a prologue runs under.
-///
-/// An interrupt entry holds no lock yet, so this is the root token: a prologue
-/// has to reach the `Epilogue` level to request an epilogue, and only a token
-/// above that level may.
-pub type PrologueToken = RootToken;
-
-/// The token an epilogue runs under: the `Epilogue` level it is named after,
-/// from which it can still reach the `Prologue` level that the prologue shares
-/// its state under.
-pub type EpilogueToken = Token<EpilogueLevelID, RootToken, Shared>;
-
 /// A driver that owns one or more interrupt vectors.
 ///
-/// The token types are parameters of the trait rather than of each method: a
-/// method generic over its token has no single address to put in a vtable, so a
-/// trait whose methods are generic cannot be made into an object, and
-/// [`InterruptRouter`] holds these as `dyn`. A driver implements the trait for
-/// every token type that satisfies the bounds and so stays as general as it is
-/// today. Only the table pins the three down.
-pub trait IRQCapable<DriverToken, PrologueToken, EpilogueToken>: Module
-where
-    DriverToken: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
-    PrologueToken: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
-    EpilogueToken: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
-{
+/// Every method is generic over its token, so nothing here pins a driver to
+/// one token type. That is possible because [`InterruptRouter`] holds its
+/// drivers as [`IRQCapableDriver`], the enum naming each of them, rather than
+/// as a trait object: a method generic over its token has no single address to
+/// put in a vtable, so a trait whose methods are generic cannot be made into
+/// an object at all.
+pub trait IRQCapable: Module {
     /// Tells the device to start raising its interrupts.
     ///
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    fn enable_irqs(&self, token: DriverToken) -> Result<DriverToken, (Errno, DriverToken)>;
+    fn enable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken;
 
     /// Tells the device to stop raising its interrupts.
     ///
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    fn disable_irqs(&self, token: DriverToken) -> Result<DriverToken, (Errno, DriverToken)>;
+    fn disable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken;
 
     /// Whether the device is currently raising its interrupts.
     ///
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    fn irqs_enabled(&self, token: DriverToken)
-    -> Result<(bool, DriverToken), (Errno, DriverToken)>;
+    fn irqs_enabled<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken;
 
     /// The half that runs in interrupt context, straight off the vector.
     ///
@@ -88,13 +69,12 @@ where
     ///
     /// # Token
     ///
-    /// The `token` is consumed and returned in both arms. It is the root
-    /// token, so a prologue holds nothing on entry and has to reach the
-    /// `Epilogue` level itself to request its epilogue.
-    fn prologue(
-        &self,
-        token: PrologueToken,
-    ) -> Result<(bool, PrologueToken), (Errno, PrologueToken)>;
+    /// The `token` is consumed and returned in both arms. A prologue holds
+    /// nothing on entry and has to reach the `Epilogue` level itself to
+    /// request its epilogue, which is what the bound asks for.
+    fn prologue<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
+    where
+        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken;
 
     /// The deferred half, run once a prologue has asked for it.
     ///
@@ -104,11 +84,104 @@ where
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    fn epilogue(&self, token: EpilogueToken) -> Result<EpilogueToken, (Errno, EpilogueToken)>;
+    fn epilogue<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken;
 }
 
-/// A handle on a driver, as the router holds it.
-pub type IRQDriver = Arc<dyn IRQCapable<DriverToken, PrologueToken, EpilogueToken>>;
+/// A handle on a driver that owns interrupt vectors, as the router holds it.
+///
+/// One variant per driver implementing [`IRQCapable`], rather than an
+/// `Arc<dyn IRQCapable>`: the trait's methods are generic over their token and
+/// therefore have no vtable entry, so a trait object cannot be formed. The
+/// methods below match on the variant instead, which dispatches to the
+/// concrete driver statically and lets each of them stay generic over its own
+/// token — that is exactly what a `dyn` handle cost before, since it pinned
+/// every call to one token type.
+///
+/// Cloning a handle is the [`Arc`](crate::kernel::arc::Arc) clone of the
+/// driver it names, which is what makes a slot of the router's table cheap to
+/// read out.
+///
+/// No driver implements [`IRQCapable`] yet, so the enum has no variants and
+/// the table below is empty by construction. Each driver that gains an
+/// implementation adds its variant here and one arm to every method.
+#[derive(Clone)]
+pub enum IRQCapableDriver {}
+
+// Every method below matches on the variant and forwards to the concrete
+// driver's `IRQCapable` method, handing `token` along. There are no variants
+// yet, so each match is empty and diverges, and `token` is discarded to keep
+// it from reading as unused — the first variant added removes those lines.
+impl IRQCapableDriver {
+    /// Tells the device to start raising its interrupts, see
+    /// [`IRQCapable::enable_irqs`].
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned in both arms.
+    pub fn enable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        let _ = token;
+        match *self {}
+    }
+
+    /// Tells the device to stop raising its interrupts, see
+    /// [`IRQCapable::disable_irqs`].
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned in both arms.
+    pub fn disable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        let _ = token;
+        match *self {}
+    }
+
+    /// Whether the device is currently raising its interrupts, see
+    /// [`IRQCapable::irqs_enabled`].
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned in both arms.
+    pub fn irqs_enabled<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        let _ = token;
+        match *self {}
+    }
+
+    /// The half that runs in interrupt context, see [`IRQCapable::prologue`].
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned in both arms.
+    pub fn prologue<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
+    where
+        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
+    {
+        let _ = token;
+        match *self {}
+    }
+
+    /// The deferred half, see [`IRQCapable::epilogue`].
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned in both arms.
+    pub fn epilogue<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+    {
+        let _ = token;
+        match *self {}
+    }
+}
 
 /// The driver in charge of each interrupt vector.
 ///
@@ -124,11 +197,12 @@ pub type IRQDriver = Arc<dyn IRQCapable<DriverToken, PrologueToken, EpilogueToke
 ///
 /// # Dropping
 ///
-/// The slots hold [`Arc`] handles, and dropping the last handle on a driver
-/// frees it, which needs a token that [`Drop`] has no way of being given. A
-/// router therefore belongs in a `static`, which never goes out of scope.
+/// A slot holds an [`Arc`](crate::kernel::arc::Arc) handle on its driver, and
+/// dropping the last handle on a driver frees it, which needs a token that
+/// [`Drop`] has no way of being given. A router therefore belongs in a
+/// `static`, which never goes out of scope.
 pub struct InterruptRouter {
-    vector_table: PrologueRWTicketlock<[Option<IRQDriver>; InterruptVector::MAX_NUM]>,
+    vector_table: PrologueRWTicketlock<[Option<IRQCapableDriver>; InterruptVector::MAX_NUM]>,
 }
 
 impl Default for InterruptRouter {
@@ -171,9 +245,9 @@ impl InterruptRouter {
     pub fn register<Token>(
         &self,
         vector: InterruptVector,
-        driver: IRQDriver,
+        driver: IRQCapableDriver,
         token: Token,
-    ) -> Result<(Option<IRQDriver>, Token), (Errno, Token)>
+    ) -> Result<(Option<IRQCapableDriver>, Token), (Errno, Token)>
     where
         Token: CanAcquire<<MemoryManagementLevelID as LockId>::Level> + PreviousToken,
     {
@@ -203,7 +277,7 @@ impl InterruptRouter {
         &self,
         vector: InterruptVector,
         token: Token,
-    ) -> (Option<IRQDriver>, Token)
+    ) -> (Option<IRQCapableDriver>, Token)
     where
         Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
     {
@@ -234,9 +308,8 @@ pub static INTERRUPT_ROUTER: InterruptRouter = InterruptRouter::new();
 pub trait InterruptController: Module {
     /// Puts `driver` in charge of `vector` in the [`INTERRUPT_ROUTER`].
     ///
-    /// Generic over the concrete driver instead of taking an [`IRQDriver`], so
-    /// that a caller hands over the `Arc<Driver>` it already has and the
-    /// unsizing to `dyn` happens here.
+    /// Takes an [`IRQCapableDriver`], so a caller wraps the `Arc<Driver>` it
+    /// already has in that driver's variant and keeps its own handle.
     ///
     /// # Panics
     ///
@@ -245,15 +318,14 @@ pub trait InterruptController: Module {
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    fn register<Token, Driver>(
+    fn register<Token>(
         &self,
         token: Token,
-        driver: Arc<Driver>,
+        driver: IRQCapableDriver,
         vector: InterruptVector,
     ) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
-        Driver: 'static + IRQCapable<DriverToken, PrologueToken, EpilogueToken>,
     {
         let (prev, token) = INTERRUPT_ROUTER.register(vector, driver, token)?;
         if let Some(_prev) = prev {
@@ -289,16 +361,17 @@ pub trait InterruptController: Module {
     ///
     /// # Token
     ///
-    /// Takes the [`DriverToken`] the table pins the driver's driver-level
-    /// calls to, rather than any token that reaches the `Driver` level:
-    /// [`InterruptRouter`] holds its drivers as `dyn`, so the token type of
-    /// [`IRQCapable::disable_irqs`] is fixed and a generic one cannot reach it.
-    /// The `token` is consumed and returned in both arms.
-    fn disable_interrupt_vector(
+    /// The `token` is consumed and returned in both arms. Any token reaching
+    /// the `Driver` level does, since the router hands the driver back as an
+    /// [`IRQCapableDriver`] whose calls are generic over their token.
+    fn disable_interrupt_vector<Token>(
         &self,
         vector: InterruptVector,
-        token: DriverToken,
-    ) -> Result<DriverToken, (Errno, DriverToken)> {
+        token: Token,
+    ) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
         let (driver, token) = match INTERRUPT_ROUTER.driver_for(vector, token) {
             (Some(driver), token) => (driver, token),
             (None, token) => {
@@ -318,14 +391,16 @@ pub trait InterruptController: Module {
     ///
     /// # Token
     ///
-    /// Takes a [`DriverToken`], for the reason given on
-    /// [`disable_interrupt_vector`](Self::disable_interrupt_vector). The
-    /// `token` is consumed and returned in both arms.
-    fn enable_interrupt_vector(
+    /// The `token` is consumed and returned in both arms, as on
+    /// [`disable_interrupt_vector`](Self::disable_interrupt_vector).
+    fn enable_interrupt_vector<Token>(
         &self,
         vector: InterruptVector,
-        token: DriverToken,
-    ) -> Result<DriverToken, (Errno, DriverToken)> {
+        token: Token,
+    ) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
         let (driver, token) = match INTERRUPT_ROUTER.driver_for(vector, token) {
             (Some(driver), token) => (driver, token),
             (None, token) => {
@@ -345,14 +420,16 @@ pub trait InterruptController: Module {
     ///
     /// # Token
     ///
-    /// Takes a [`DriverToken`], for the reason given on
-    /// [`disable_interrupt_vector`](Self::disable_interrupt_vector). The
-    /// `token` is consumed and returned in both arms.
-    fn enabled_interrupt_vector(
+    /// The `token` is consumed and returned in both arms, as on
+    /// [`disable_interrupt_vector`](Self::disable_interrupt_vector).
+    fn enabled_interrupt_vector<Token>(
         &self,
         vector: InterruptVector,
-        token: DriverToken,
-    ) -> Result<(bool, DriverToken), (Errno, DriverToken)> {
+        token: Token,
+    ) -> Result<(bool, Token), (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
         let (driver, token) = match INTERRUPT_ROUTER.driver_for(vector, token) {
             (Some(driver), token) => (driver, token),
             (None, token) => {

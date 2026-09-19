@@ -20,7 +20,7 @@ use crate::arch::generic::paging::ReversePaging;
 use crate::driver::acpi::madt::MADT;
 use crate::driver::acpi::rsdp::RSDP;
 use crate::driver::acpi::xsdt::XSDT;
-use crate::driver::module::Modules;
+use crate::driver::module::{ModuleDriver, Modules};
 use crate::kernel::arc::Arc;
 use crate::{
     arch::Paging,
@@ -270,7 +270,7 @@ impl Module for Acpi {
                 panic!("Unable to create sharable ACPI driver instance: {}", error);
             }
         };
-        token = match Modules::register(driver, token) {
+        token = match Modules::register(ModuleDriver::Acpi(driver), token) {
             Ok(token) => token,
             Err((error, _)) => {
                 panic!("Unable to register ACPI driver instance: {}", error);

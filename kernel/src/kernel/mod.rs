@@ -15,5 +15,5 @@ pub mod printk;
 pub mod prologue_lock;
 pub mod spinlock;
 pub mod ticketlock;
-pub mod vec;
 pub mod time;
+pub mod vec;

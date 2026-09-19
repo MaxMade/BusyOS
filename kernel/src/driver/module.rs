@@ -1,4 +1,5 @@
 use crate::{
+    driver::acpi::acpi::Acpi,
     kernel::{
         arc::Arc,
         linked_list::LinkedList,
@@ -8,7 +9,7 @@ use crate::{
     user::errno::{Errno, ToErrno},
 };
 
-pub struct Modules(LinkedList<Arc<dyn Module>>);
+pub struct Modules(LinkedList<ModuleDriver>);
 
 pub static MODULES: DriverRWTicketlock<Modules> =
     DriverRWTicketlock::new(RWTicketlock::new(), Modules(LinkedList::new()));
@@ -21,9 +22,9 @@ unsafe extern "C" {
 impl Modules {
     /// Adds `module` to the list every later pass over the drivers walks.
     ///
-    /// Generic over the concrete module instead of taking an `Arc<dyn Module>`,
-    /// so that a caller registers the `Arc<Driver>` it already holds and keeps
-    /// using it afterwards. The unsizing to `dyn` happens here.
+    /// Takes a [`ModuleDriver`], the enum naming every registered driver, so a
+    /// caller wraps the `Arc<Driver>` it already holds in that driver's variant
+    /// and keeps using its own handle afterwards.
     ///
     /// # Errors
     ///
@@ -33,10 +34,7 @@ impl Modules {
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    pub fn register<Token, Driver: 'static + Module>(
-        module: Arc<Driver>,
-        token: Token,
-    ) -> Result<Token, (Errno, Token)>
+    pub fn register<Token>(module: ModuleDriver, token: Token) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
@@ -79,4 +77,19 @@ pub trait Module: Send + Sync {
     where
         Self: Sized,
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken;
+}
+
+/// A handle on a registered driver, as [`Modules`] holds it.
+///
+/// One variant per driver that registers itself, rather than an
+/// `Arc<dyn Module>`: [`Module::init`] is generic over its token, so the trait
+/// has no vtable to hold, and [`Arc`] cannot unsize to a `dyn` value in this
+/// kernel anyway. Matching on the enum dispatches to the concrete driver
+/// statically, so a driver's own methods stay generic over their token.
+///
+/// Cloning a handle is the [`Arc`] clone of the driver it names.
+#[derive(Clone)]
+pub enum ModuleDriver {
+    /// The ACPI driver, see [`Acpi`].
+    Acpi(Arc<Acpi>),
 }
