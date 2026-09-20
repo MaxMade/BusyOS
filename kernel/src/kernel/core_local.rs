@@ -1,8 +1,8 @@
 //! Core-local (per-CPU) storage.
 //!
-//! Variables declared with [`core_local!`] are placed in the `.percpu`
-//! section, which holds the template for a single core's block. A variable
-//! is reached as
+//! Variables declared with [`core_local!`](crate::core_local) are placed in
+//! the `.percpu` section, which holds the template for a single core's block.
+//! A variable is reached as
 //!
 //! ```text
 //! GS base of the current core + (&VAR - _percpu_start)
@@ -26,7 +26,14 @@ use core::ffi::c_void;
 
 use crate::arch::CPU;
 use crate::arch::generic::cpu::{CPU as _, InterruptFlag};
-use crate::kernel::locking::PreviousToken;
+use crate::kernel::btreemap::BTreeMap;
+use crate::kernel::btreeset::BTreeSet;
+use crate::kernel::hashmap::{DefaultHashBuilder, HashMap};
+use crate::kernel::hashset::HashSet;
+use crate::kernel::linked_list::LinkedList;
+use crate::kernel::locking::{MemoryManagementLevelID, PreviousToken};
+use crate::kernel::vec::Vec;
+use crate::utils::allocator::Allocator;
 
 unsafe extern "C" {
     /// First byte of the `.percpu` template, defined by the linker script.
@@ -91,18 +98,26 @@ pub unsafe fn init_block_base(cpu_id: usize) -> *const c_void {
 ///
 /// ```ignore
 /// core_local! {
-///     (pub) static FOO: *const c_void;   // starts out empty
+///     (pub) static FOO: *const c_void;   // starts out unset
 ///     static BAR: usize = 0;             // every core starts at 0
 /// }
 /// ```
 ///
-/// A variable declared without an initialiser starts out empty on every core
+/// A variable declared without an initialiser starts out *unset* on every core
 /// and [`PerCPU::with`] panics until something calls [`PerCPU::set`]. With
 /// `= <const expr>` the value becomes part of the template, so every core
 /// starts out holding it.
 ///
-/// An initialiser requires `T: Copy`, because the template is bit-copied into
-/// every core's block at boot; see [`PerCPU::with_value`].
+/// An initialiser requires [`T: TemplateValue`](TemplateValue), because the
+/// template is bit-copied into every core's block at boot; see
+/// [`PerCPU::with_value`]. Every `Copy` type qualifies, and so do the kernel's
+/// collections, whose only const-constructible value is the empty one:
+///
+/// ```ignore
+/// core_local! {
+///     static WORK: LinkedList<Work> = LinkedList::new();
+/// }
+/// ```
 ///
 /// `Default` cannot be used here — it is not a `const fn`, and the macro has
 /// no way to know whether a type implements it. Use
@@ -270,9 +285,94 @@ macro_rules! core_local {
     };
 }
 
+/// A value that may stand in the `.percpu` template.
+///
+/// The template is *bit-copied* into every core's block at boot, so an
+/// initialiser given to [`core_local!`](crate::core_local) is duplicated once
+/// per core without any constructor or `Clone` running. This trait is what
+/// says a value survives that.
+///
+/// # Safety
+///
+/// Every copy has to be an independent, valid value of the type, which means
+/// the value must own nothing — no allocation, no handle, no reference count —
+/// and must not point into itself. A value that owns something would end up
+/// with one owner per core, and dropping any two of them would be a double
+/// free.
+///
+/// The bound is on the *type*, while what is really required holds of the
+/// particular value in the template, so an implementation for a type that is
+/// not [`Copy`] is only sound if no const expression can build a value of it
+/// that owns something. That is the case for the kernel's collections, and it
+/// is the reason each of them is listed below by hand.
+pub unsafe trait TemplateValue {}
+
+// SAFETY: a `Copy` type owns nothing by definition — `Copy` and `Drop` are
+// mutually exclusive — and copying one is already a bit-copy.
+unsafe impl<T: Copy> TemplateValue for T {}
+
+// The collections below are not `Copy`, and must never become `Copy`: each of
+// them owns whatever it holds, and each panics in `Drop` rather than free it
+// without a token. They are listed here anyway because the *only* value of
+// any of them a const expression can produce is the empty one — putting
+// anything in a collection allocates, and every operation that allocates
+// takes a token and is therefore not `const`. An empty collection holds no
+// block and no node, so bit-copying it hands every core its own, equally
+// empty, collection.
+//
+// Each impl requires the allocator handle to be `Copy`, for the reason the
+// blanket impl above gives: it is duplicated along with the collection. The
+// kernel `Heap`, which is the default, is a unit struct and qualifies.
+//
+// Adding a `Copy` impl to any of these types would make the impl here overlap
+// the blanket one and fail to compile, which is the outcome to want: such a
+// type could be copied while it holds something.
+
+// SAFETY: as argued above.
+unsafe impl<T, A> TemplateValue for LinkedList<T, A> where
+    A: Allocator<MemoryManagementLevelID> + Copy
+{
+}
+
+// SAFETY: as above.
+unsafe impl<T, A> TemplateValue for Vec<T, A> where A: Allocator<MemoryManagementLevelID> + Copy {}
+
+// SAFETY: as above.
+unsafe impl<K, V, A> TemplateValue for BTreeMap<K, V, A> where
+    A: Allocator<MemoryManagementLevelID> + Copy
+{
+}
+
+// SAFETY: as above.
+unsafe impl<T, A> TemplateValue for BTreeSet<T, A> where A: Allocator<MemoryManagementLevelID> + Copy
+{}
+
+// The two hashed collections are pinned to `DefaultHashBuilder`, the hasher
+// they use unless another one is named, rather than taking any `S: Copy`: a
+// map holds its builder by value, so the builder is duplicated along with the
+// map, and `BuildHasherDefault` is not `Copy` — it owns nothing either, being
+// a `PhantomData`, but std says so nowhere the compiler can use. A map built
+// on some other hasher needs its own impl here, and is sound to add exactly
+// when that hasher owns nothing.
+
+// SAFETY: as argued above, and `DefaultHashBuilder` is a zero-sized
+// `PhantomData` marker that owns nothing.
+unsafe impl<K, V, A> TemplateValue for HashMap<K, V, DefaultHashBuilder, A> where
+    A: Allocator<MemoryManagementLevelID> + Copy
+{
+}
+
+// SAFETY: as above.
+unsafe impl<T, A> TemplateValue for HashSet<T, DefaultHashBuilder, A> where
+    A: Allocator<MemoryManagementLevelID> + Copy
+{
+}
+
 /// Storage for one core-local variable.
 ///
-/// Starts out empty on every core; [`set`](PerCPU::set) installs a value.
+/// Starts out unset on every core; [`set`](PerCPU::set) installs a value, and
+/// an initialiser given to [`core_local!`](crate::core_local) puts one in the
+/// template.
 #[repr(transparent)]
 pub struct PerCPU<T>(RefCell<Option<T>>);
 
@@ -315,15 +415,15 @@ impl Drop for InterruptGuard {
 }
 
 impl<T> PerCPU<T> {
-    /// Creates an empty slot.
+    /// Creates an unset slot.
     ///
     /// # Safety
     ///
     /// The result must end up in the `.percpu` section. Every accessor
     /// locates this core's copy as `GS base + (self - _percpu_start)`, which
     /// is a meaningless address for a `PerCPU` living anywhere else — on the
-    /// stack, in `.data`, or inside another struct. Use [`core_local!`],
-    /// which places the item correctly.
+    /// stack, in `.data`, or inside another struct. Use
+    /// [`core_local!`](crate::core_local), which places the item correctly.
     pub const unsafe fn new() -> Self {
         Self(RefCell::new(None))
     }
@@ -333,16 +433,17 @@ impl<T> PerCPU<T> {
     /// `value` has to be a const expression, since it becomes part of the
     /// template.
     ///
-    /// `T: Copy` is required because the template is *bit-copied* into every
-    /// core's block at boot. A type that owns something would end up with one
-    /// owner per core, and dropping any two of them would be a double free.
+    /// [`T: TemplateValue`](TemplateValue) is required because the template is
+    /// *bit-copied* into every core's block at boot: every `Copy` type, and
+    /// the kernel's collections, whose only const-constructible value is the
+    /// empty one. See the trait for what a type has to satisfy.
     ///
     /// # Safety
     ///
     /// As for [`new`](PerCPU::new): the result must end up in `.percpu`.
     pub const unsafe fn with_value(value: T) -> Self
     where
-        T: Copy,
+        T: TemplateValue,
     {
         Self(RefCell::new(Some(value)))
     }
