@@ -99,7 +99,8 @@ pub struct FeatureInformationEDX {
     ///
     /// When set, the `IA32_PAT` MSR exists and the `PAT` bit of a leaf page
     /// table entry selects one of its eight memory types. Must be checked
-    /// before [`PAT`](crate::arch::x86_64::msr::PAT) is read or written.
+    /// before `IA32_PAT` is read or written, see
+    /// [`install_pat`](crate::arch::x86_64::paging::install_pat).
     #[bits(1, access = RO)]
     pub pat: bool,
 
