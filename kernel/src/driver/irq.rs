@@ -1,16 +1,19 @@
 //! Interrupt routing: which driver owns which vector, and the two halves an
 //! interrupt is handled in.
 //!
-//! [`InterruptRouter`] answers the only question the interrupt path asks,
-//! namely which [`IRQCapable`] driver is in charge of the vector that just
-//! arrived. [`InterruptController`] is the other side of that, the chip which
-//! delivers the vector, and it is what a driver goes through to have its own
-//! vector masked or unmasked.
+//! [`InterruptVectorTable`] answers the only question the interrupt path
+//! asks, namely which [`IRQCapable`] driver is in charge of the vector that
+//! just arrived. [`InterruptController`] is the other side of that, the chip
+//! which delivers the vector, and it is what a driver goes through to have
+//! its own vector masked or unmasked.
 //!
 //! Handling a vector is split in two. The prologue runs in interrupt context,
 //! does only what cannot wait, and reports whether the rest is needed. The
 //! epilogue then runs from a level that may still take the driver's own
 //! locks.
+
+#[cfg(target_arch = "x86_64")]
+use crate::{driver::x86_64::x2apic::X2Apic, kernel::arc::Arc};
 
 use crate::{
     arch::{InterruptVector, generic::cpu::InterruptVector as GenericInterruptVector},
@@ -28,7 +31,7 @@ use crate::{
 /// A driver that owns one or more interrupt vectors.
 ///
 /// Every method is generic over its token, so nothing here pins a driver to
-/// one token type. That is possible because [`InterruptRouter`] holds its
+/// one token type. That is possible because [`InterruptVectorTable`] holds its
 /// drivers as [`IRQCapableDriver`], the enum naming each of them, rather than
 /// as a trait object: a method generic over its token has no single address to
 /// put in a vtable, so a trait whose methods are generic cannot be made into
@@ -89,7 +92,8 @@ pub trait IRQCapable: Module {
         Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken;
 }
 
-/// A handle on a driver that owns interrupt vectors, as the router holds it.
+/// A handle on a driver that owns interrupt vectors, as the
+/// [`InterruptVectorTable`] holds it.
 ///
 /// One variant per driver implementing [`IRQCapable`], rather than an
 /// `Arc<dyn IRQCapable>`: the trait's methods are generic over their token and
@@ -99,20 +103,22 @@ pub trait IRQCapable: Module {
 /// token — that is exactly what a `dyn` handle cost before, since it pinned
 /// every call to one token type.
 ///
-/// Cloning a handle is the [`Arc`](crate::kernel::arc::Arc) clone of the
-/// driver it names, which is what makes a slot of the router's table cheap to
-/// read out.
+/// Cloning a handle is the [`Arc`] clone of the driver it names, which is
+/// what makes a slot of the vector table cheap to read out.
 ///
-/// No driver implements [`IRQCapable`] yet, so the enum has no variants and
-/// the table below is empty by construction. Each driver that gains an
-/// implementation adds its variant here and one arm to every method.
+/// Each driver that implements [`IRQCapable`] adds its variant here, gated on
+/// the architecture it exists for, and one arm to every method.
 #[derive(Clone)]
-pub enum IRQCapableDriver {}
+pub enum IRQCapableDriver {
+    #[cfg(target_arch = "x86_64")]
+    /// The x2APIC driver, see [`X2Apic`].
+    X2Apic(Arc<X2Apic>),
+}
 
 // Every method below matches on the variant and forwards to the concrete
-// driver's `IRQCapable` method, handing `token` along. There are no variants
-// yet, so each match is empty and diverges, and `token` is discarded to keep
-// it from reading as unused — the first variant added removes those lines.
+// driver's `IRQCapable` method, handing `token` along. On an architecture
+// none of the variants exist for, each match is empty and diverges, and
+// `token` is discarded to keep it from reading as unused there.
 impl IRQCapableDriver {
     /// Tells the device to start raising its interrupts, see
     /// [`IRQCapable::enable_irqs`].
@@ -125,7 +131,10 @@ impl IRQCapableDriver {
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
         let _ = token;
-        match *self {}
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            IRQCapableDriver::X2Apic(x2apic) => x2apic.enable_irqs(token),
+        }
     }
 
     /// Tells the device to stop raising its interrupts, see
@@ -139,7 +148,10 @@ impl IRQCapableDriver {
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
         let _ = token;
-        match *self {}
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            IRQCapableDriver::X2Apic(x2apic) => x2apic.disable_irqs(token),
+        }
     }
 
     /// Whether the device is currently raising its interrupts, see
@@ -153,7 +165,10 @@ impl IRQCapableDriver {
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
         let _ = token;
-        match *self {}
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            IRQCapableDriver::X2Apic(x2apic) => x2apic.irqs_enabled(token),
+        }
     }
 
     /// The half that runs in interrupt context, see [`IRQCapable::prologue`].
@@ -166,7 +181,10 @@ impl IRQCapableDriver {
         Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
     {
         let _ = token;
-        match *self {}
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            IRQCapableDriver::X2Apic(x2apic) => x2apic.prologue(token),
+        }
     }
 
     /// The deferred half, see [`IRQCapable::epilogue`].
@@ -179,7 +197,10 @@ impl IRQCapableDriver {
         Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
     {
         let _ = token;
-        match *self {}
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            IRQCapableDriver::X2Apic(x2apic) => x2apic.epilogue(token),
+        }
     }
 }
 
@@ -197,25 +218,19 @@ impl IRQCapableDriver {
 ///
 /// # Dropping
 ///
-/// A slot holds an [`Arc`](crate::kernel::arc::Arc) handle on its driver, and
-/// dropping the last handle on a driver frees it, which needs a token that
-/// [`Drop`] has no way of being given. A router therefore belongs in a
-/// `static`, which never goes out of scope.
-pub struct InterruptRouter {
+/// A slot holds an [`Arc`] handle on its driver, and dropping the last handle
+/// on a driver frees it, which needs a token that [`Drop`] has no way of
+/// being given. The table therefore lives in a `static` of this module,
+/// which never goes out of scope.
+pub struct InterruptVectorTable {
     vector_table: PrologueRWTicketlock<[Option<IRQCapableDriver>; InterruptVector::MAX_NUM]>,
 }
 
-impl Default for InterruptRouter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl InterruptRouter {
-    /// Creates a router that is in charge of nothing yet.
+impl InterruptVectorTable {
+    /// Creates a table in which no vector has a driver yet.
     ///
-    /// The table is part of the router and starts out empty, so this allocates
-    /// nothing and may be used to build a `static`.
+    /// Every slot starts out empty and the table is one fixed-size array, so
+    /// this allocates nothing and may be used to build a `static`.
     pub const fn new() -> Self {
         Self {
             vector_table: PrologueRWTicketlock::new(
@@ -243,7 +258,6 @@ impl InterruptRouter {
     /// the `Prologue` level the table is locked at. It is consumed for the
     /// write and returned in both arms.
     pub fn register<Token>(
-        &self,
         vector: InterruptVector,
         driver: IRQCapableDriver,
         token: Token,
@@ -251,7 +265,7 @@ impl InterruptRouter {
     where
         Token: CanAcquire<<MemoryManagementLevelID as LockId>::Level> + PreviousToken,
     {
-        let mut vector_table = self.vector_table.acquire(token);
+        let mut vector_table = INTERRUPT_VECTOR_TABLE.vector_table.acquire(token);
 
         let vector = vector.into_raw() as usize;
         let prev = vector_table[vector].replace(driver);
@@ -297,43 +311,15 @@ impl InterruptRouter {
 
 /// The one routing table, which every interrupt entry and every
 /// [`InterruptController`] works through.
-pub static INTERRUPT_ROUTER: InterruptRouter = InterruptRouter::new();
+static INTERRUPT_VECTOR_TABLE: InterruptVectorTable = InterruptVectorTable::new();
 
 /// The chip that delivers interrupt vectors, such as a PIC or an APIC.
 ///
-/// The controller owns delivery and the [`INTERRUPT_ROUTER`] owns the mapping
+/// The controller owns delivery and [`InterruptVectorTable`] owns the mapping
 /// from a vector to its driver, so the default methods below are the path a
 /// caller takes to reach whoever is in charge of a vector. Only
 /// [`acknowledge`](Self::acknowledge) is left to the concrete chip.
 pub trait InterruptController: Module {
-    /// Puts `driver` in charge of `vector` in the [`INTERRUPT_ROUTER`].
-    ///
-    /// Takes an [`IRQCapableDriver`], so a caller wraps the `Arc<Driver>` it
-    /// already has in that driver's variant and keeps its own handle.
-    ///
-    /// # Panics
-    ///
-    /// If another driver is already in charge of `vector`.
-    ///
-    /// # Token
-    ///
-    /// The `token` is consumed and returned in both arms.
-    fn register<Token>(
-        &self,
-        token: Token,
-        driver: IRQCapableDriver,
-        vector: InterruptVector,
-    ) -> Result<Token, (Errno, Token)>
-    where
-        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
-    {
-        let (prev, token) = INTERRUPT_ROUTER.register(vector, driver, token)?;
-        if let Some(_prev) = prev {
-            panic!("Detected interrupt-sharing");
-        }
-        Ok(token)
-    }
-
     /// Tells the chip that `vector` has been handled and may be delivered
     /// again.
     ///
@@ -372,7 +358,7 @@ pub trait InterruptController: Module {
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
-        let (driver, token) = match INTERRUPT_ROUTER.driver_for(vector, token) {
+        let (driver, token) = match INTERRUPT_VECTOR_TABLE.driver_for(vector, token) {
             (Some(driver), token) => (driver, token),
             (None, token) => {
                 return Err((Errno::EINVAL, token));
@@ -401,7 +387,7 @@ pub trait InterruptController: Module {
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
-        let (driver, token) = match INTERRUPT_ROUTER.driver_for(vector, token) {
+        let (driver, token) = match INTERRUPT_VECTOR_TABLE.driver_for(vector, token) {
             (Some(driver), token) => (driver, token),
             (None, token) => {
                 return Err((Errno::EINVAL, token));
@@ -430,7 +416,7 @@ pub trait InterruptController: Module {
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
-        let (driver, token) = match INTERRUPT_ROUTER.driver_for(vector, token) {
+        let (driver, token) = match INTERRUPT_VECTOR_TABLE.driver_for(vector, token) {
             (Some(driver), token) => (driver, token),
             (None, token) => {
                 return Err((Errno::EINVAL, token));
@@ -440,3 +426,128 @@ pub trait InterruptController: Module {
         driver.irqs_enabled(token)
     }
 }
+
+/// A handle on the driver of an interrupt controller.
+///
+/// One variant per chip that can deliver vectors, for the reason
+/// [`IRQCapableDriver`] gives: [`InterruptController`] is generic over its
+/// token, so it has no vtable and cannot be held as a `dyn` value.
+///
+/// Cloning a handle is the [`Arc`] clone of the driver it names.
+#[derive(Clone)]
+pub enum InterruptControllerDriver {
+    #[cfg(target_arch = "x86_64")]
+    /// The x2APIC driver, see [`X2Apic`].
+    X2Apic(Arc<X2Apic>),
+}
+
+// The enum is a `Module` so that it can be an `InterruptController`, which
+// requires one. Only `name` means anything on a handle, since the driver it
+// names has long been initialised by the time a handle exists.
+impl Module for InterruptControllerDriver {
+    /// Never called.
+    ///
+    /// A handle names a driver that is already up, so there is nothing here
+    /// to initialise. Each concrete driver is brought up through its own
+    /// [`Module::init`], which is what creates the handle in the first
+    /// place.
+    ///
+    /// # Panics
+    ///
+    /// Always.
+    fn init<Token>(_: Token) -> Result<Token, (Errno, Token)>
+    where
+        Self: Sized,
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        panic!("InterruptControllerDriver::init(...) must never be invoked directly.")
+    }
+
+    /// The name of the driver this handle names, see [`Module::name`].
+    fn name(&self) -> &'static str {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            InterruptControllerDriver::X2Apic(x2apic) => x2apic.name(),
+        }
+    }
+}
+
+impl InterruptController for InterruptControllerDriver {
+    /// Forwards to the concrete chip, see [`InterruptController::acknowledge`].
+    fn acknowledge<Token>(
+        &self,
+        vector: InterruptVector,
+        token: Token,
+    ) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            InterruptControllerDriver::X2Apic(x2_apic) => x2_apic.acknowledge(vector, token),
+        }
+    }
+}
+
+/// The chip that delivers interrupt vectors on this machine.
+///
+/// Room for one, not a list, and it is what the interrupt path acknowledges
+/// a vector to. A machine with several controllers is not handled yet, see
+/// [`register`](Self::register).
+///
+/// Locked at the `Prologue` level, like [`InterruptVectorTable`] and for the
+/// same reason: the interrupt path reads it, so the read must not be
+/// interrupted by the very vector it is about to acknowledge.
+pub struct InterruptControllers(PrologueRWTicketlock<Option<InterruptControllerDriver>>);
+
+impl InterruptControllers {
+    /// Creates the slot with no controller in it yet.
+    ///
+    /// Allocates nothing and may be used to build a `static`.
+    pub const fn new() -> Self {
+        Self(PrologueRWTicketlock::new(RWTicketlock::new(), None))
+    }
+
+    /// Makes `driver` the controller every vector is acknowledged to.
+    ///
+    /// Takes an [`InterruptControllerDriver`], so a caller wraps the
+    /// `Arc<Driver>` it already holds in that driver's variant and keeps its
+    /// own handle.
+    ///
+    /// # Panics
+    ///
+    /// If a controller is already registered. Which of two controllers owns
+    /// a given vector, and how a driver reaches the right one, is not
+    /// decided yet, so a second one is refused rather than silently ignored
+    /// or silently preferred.
+    ///
+    /// # Token
+    ///
+    /// The `token` has to reach the `MemoryManagement` level, which is above
+    /// the `Prologue` level the slot is locked at. It is consumed for the
+    /// write and returned in both arms.
+    pub fn register<Token>(
+        driver: InterruptControllerDriver,
+        token: Token,
+    ) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<MemoryManagementLevelID as LockId>::Level> + PreviousToken,
+    {
+        let mut ic = INTERRUPT_CONTROLLERS.0.acquire(token);
+
+        match *ic {
+            Some(_) => {
+                // TODO(@MaxMade): How to handle multiple interrupt controllers?
+                todo!("Handle multiple interrupt controller");
+            }
+            None => {
+                *ic = Some(driver);
+            }
+        }
+
+        Ok(ic.release())
+    }
+}
+
+/// The one interrupt controller, which every acknowledgement goes through.
+static INTERRUPT_CONTROLLERS: InterruptControllers = InterruptControllers::new();

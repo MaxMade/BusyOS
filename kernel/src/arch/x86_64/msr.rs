@@ -308,3 +308,251 @@ impl MSR<0x277> for PAT {
         Self(value)
     }
 }
+
+/// The *LVT Timer Register* of the local APIC in x2APIC mode.
+///
+/// One of the local vector table entries, and the one that says what the
+/// core's own timer does when it expires: which vector it raises, whether
+/// that vector is masked, and in which of the three modes
+/// ([`X2ApicLVTTimerMode`]) the timer runs.
+///
+/// The register is 32 bits wide while an MSR is 64, so the upper half reads
+/// as zero and must be written as zero.
+#[bitfield(u32)]
+pub struct X2ApicLVTTimer {
+    /// Bits 7-0: Local vector number.
+    #[bits(8)]
+    pub vector: u8,
+
+    /// Bits 11-8: Reserved.
+    #[bits(4)]
+    __: u8,
+
+    /// Bit 12: Delivery status (read-only).
+    #[bits(1, access = RO)]
+    pub delivery_status: bool,
+
+    /// Bit 15-13: Reserved.
+    #[bits(3)]
+    __: u8,
+
+    /// Bit 16: Mask.
+    #[bits(1)]
+    pub masked: bool,
+
+    /// Bits 18-17: Timer mode.
+    #[bits(2)]
+    pub timer_mode: X2ApicLVTTimerMode,
+
+    #[bits(13)]
+    __: u16,
+}
+
+/// How the local APIC timer counts, as encoded in
+/// [`X2ApicLVTTimer::timer_mode`].
+///
+/// The numeric value of each variant is the encoding the hardware expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum X2ApicLVTTimerMode {
+    /// Counts the initial count down once and then stays at zero, so the
+    /// vector is raised exactly once per count that is written.
+    OneShot = 0b00,
+
+    /// Reloads the initial count every time it reaches zero, so the vector
+    /// is raised at a fixed interval until the count is cleared.
+    Periodic = 0b01,
+
+    /// Fires when the TSC passes the deadline written to `IA32_TSC_DEADLINE`
+    /// rather than when a count runs out. The initial count is unused in
+    /// this mode.
+    TscDeadline = 0b10,
+
+    /// The encoding the architecture leaves undefined. Never written.
+    Reserved = 0b11,
+}
+
+impl X2ApicLVTTimerMode {
+    /// The encoding of this mode.
+    pub const fn into_bits(self) -> u8 {
+        self as u8
+    }
+
+    /// The mode `bits` encodes. Only the lower two bits are looked at.
+    pub const fn from_bits(bits: u8) -> Self {
+        match bits & 0b11 {
+            0b00 => Self::OneShot,
+            0b01 => Self::Periodic,
+            0b10 => Self::TscDeadline,
+            0b11 => Self::Reserved,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl MSR<0x832> for X2ApicLVTTimer {
+    fn raw(&self) -> u64 {
+        self.0 as _
+    }
+
+    unsafe fn from_raw(value: u64) -> Self {
+        Self(value as _)
+    }
+}
+
+/// The *Divide Configuration Register* of the local APIC in x2APIC mode.
+///
+/// Sets how far the core's bus or crystal clock is divided down before it
+/// reaches the timer, which is what fixes the length of one timer tick.
+/// [`X2ApicDivideMode::Divide1`] leaves the input undivided and gives the
+/// finest resolution, which is what calibration wants.
+#[bitfield(u32)]
+pub struct X2ApicDivide {
+    /// Bits 3-0: Divider Configuration.
+    #[bits(4)]
+    pub divider: X2ApicDivideMode,
+
+    #[bits(28)]
+    __: u32,
+}
+
+/// The divisor applied to the timer's input clock, as encoded in
+/// [`X2ApicDivide::divider`].
+///
+/// The numeric value of each variant is the encoding the hardware expects.
+/// Bit 2 of the field is reserved and takes no part in the encoding, which
+/// is why the eight variants leave a gap between `0b0011` and `0b1000` and
+/// why [`from_bits`](X2ApicDivideMode::from_bits) masks it off rather than
+/// treating it as part of the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum X2ApicDivideMode {
+    Divide2 = 0b0000,
+    Divide4 = 0b0001,
+    Divide8 = 0b0010,
+    Divide16 = 0b0011,
+    Divide32 = 0b1000,
+    Divide64 = 0b1001,
+    Divide128 = 0b1010,
+    Divide1 = 0b1011,
+}
+
+impl X2ApicDivideMode {
+    /// The encoding of this divisor.
+    pub const fn into_bits(self) -> u8 {
+        self as u8
+    }
+
+    /// The divisor `bits` encodes.
+    ///
+    /// Bit 2 is reserved, so it is masked off first and every one of the
+    /// eight encodings that remain names a variant. A register value with
+    /// that bit set therefore reads back as the divisor the other three bits
+    /// name, rather than as an unknown one.
+    pub const fn from_bits(bits: u8) -> Self {
+        match bits & 0b1011 {
+            0b0000 => Self::Divide2,
+            0b0001 => Self::Divide4,
+            0b0010 => Self::Divide8,
+            0b0011 => Self::Divide16,
+            0b1000 => Self::Divide32,
+            0b1001 => Self::Divide64,
+            0b1010 => Self::Divide128,
+            0b1011 => Self::Divide1,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl MSR<0x83E> for X2ApicDivide {
+    fn raw(&self) -> u64 {
+        self.0 as _
+    }
+
+    unsafe fn from_raw(value: u64) -> Self {
+        Self(value as _)
+    }
+}
+
+/// The *Initial Count Register* of the local APIC in x2APIC mode.
+///
+/// Writing it starts the timer, which counts down from this value at one
+/// step per tick of the divided input clock and raises its vector on
+/// reaching zero. In [`X2ApicLVTTimerMode::Periodic`] the value is reloaded
+/// and the timer runs again, and writing zero stops the timer outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct X2ApicInitialCount(u32);
+
+impl X2ApicInitialCount {
+    /// A count of zero, which stops the timer when written.
+    pub const fn new() -> Self {
+        Self(0)
+    }
+}
+
+impl MSR<0x838> for X2ApicInitialCount {
+    fn raw(&self) -> u64 {
+        self.0 as _
+    }
+
+    unsafe fn from_raw(value: u64) -> Self {
+        Self(value as _)
+    }
+}
+
+/// The *Current Count Register* of the local APIC in x2APIC mode.
+///
+/// How far the timer still has to go. It is loaded from
+/// [`X2ApicInitialCount`] and counts *down*, so the number of ticks that
+/// have passed since the timer was started is the initial count minus this
+/// one, and a read of zero means the timer has already expired.
+///
+/// Read-only in the hardware. Writing it has no effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct X2ApicCurrentCount(u32);
+
+impl X2ApicCurrentCount {
+    /// A count of zero, as a placeholder for a value not yet read.
+    pub const fn new() -> Self {
+        Self(0)
+    }
+}
+
+impl MSR<0x839> for X2ApicCurrentCount {
+    fn raw(&self) -> u64 {
+        self.0 as _
+    }
+
+    unsafe fn from_raw(value: u64) -> Self {
+        Self(value as _)
+    }
+}
+
+/// The *EOI Register* of the local APIC in x2APIC mode.
+///
+/// Writing it tells the local APIC that the interrupt currently in service
+/// has been handled, so that the next one of equal or lower priority may be
+/// delivered. Which vector is meant is not part of the write: the local APIC
+/// retires whatever it has in service at the highest priority.
+///
+/// Write-only. In x2APIC mode the only value that may be written is zero,
+/// anything else raises `#GP`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct X2ApicEOI(u32);
+
+impl X2ApicEOI {
+    /// A value of zero, the only one the register accepts.
+    pub const fn new() -> Self {
+        Self(0)
+    }
+}
+
+impl MSR<0x80B> for X2ApicEOI {
+    fn raw(&self) -> u64 {
+        self.0 as _
+    }
+
+    unsafe fn from_raw(value: u64) -> Self {
+        Self(value as _)
+    }
+}

@@ -6,11 +6,12 @@ use crate::arch::x86_64::gdt::SegmentSelector;
 use crate::arch::x86_64::rflags::RFLAGS;
 use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use core::num::TryFromIntError;
+use core::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 
 #[derive(Debug)]
 pub struct CPU;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct CPUID(u8);
 
 /// Id of the core the firmware starts the kernel on.
@@ -234,6 +235,36 @@ impl crate::arch::generic::cpu::InterruptVector for InterruptVector {
 
     fn is_invalid_alignmnet(&self) -> bool {
         self.0 == Exceptions::AlignmentCheck as _
+    }
+
+    /// Hands out the next unused vector, counting up from 32.
+    ///
+    /// Vectors 0 to 31 are the architecturally defined exceptions, so the
+    /// first one software may claim is 32, and the counter starts there. It
+    /// only ever moves forward, so every caller gets a vector of its own.
+    ///
+    /// The last vector handed out is 254. Reaching 255 is what marks the
+    /// counter as exhausted, so 255 itself is never given to a driver, and
+    /// it stays free to serve as the local APIC's spurious vector.
+    fn allocate() -> Option<Self> {
+        static VECTOR: AtomicU8 = AtomicU8::new(32);
+
+        let mut cur = VECTOR.load(AtomicOrdering::Relaxed);
+        loop {
+            if cur == u8::MAX {
+                return None;
+            }
+
+            match VECTOR.compare_exchange(
+                cur,
+                cur + 1,
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+            ) {
+                Ok(_) => return Some(Self(cur)),
+                Err(next) => cur = next,
+            }
+        }
     }
 }
 

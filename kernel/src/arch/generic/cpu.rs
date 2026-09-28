@@ -106,6 +106,23 @@ where
 
     /// Whether this vector is the alignment-check exception.
     fn is_invalid_alignmnet(&self) -> bool;
+
+    /// Hands out a vector no caller has been given before, or [`None`] once
+    /// they are used up.
+    ///
+    /// Safe to call from several cores at once: two concurrent callers still
+    /// get different vectors.
+    ///
+    /// A driver that needs an interrupt of its own asks here rather than
+    /// picking a number, so two drivers cannot settle on the same vector.
+    /// Only the vectors the architecture leaves to software are handed out,
+    /// never one an exception already owns.
+    ///
+    /// A vector is never given back. There is no matching release, because
+    /// nothing unregisters a driver yet, and a vector freed while the
+    /// controller still routes it would be handed to a second driver that
+    /// then sees the first one's interrupts.
+    fn allocate() -> Option<Self>;
 }
 
 /// Architecture-neutral view of the state an interrupt/exception saved on

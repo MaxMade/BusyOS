@@ -11,4 +11,5 @@
 pub mod acpi;
 pub mod irq;
 pub mod module;
+pub mod timer;
 pub mod x86_64;

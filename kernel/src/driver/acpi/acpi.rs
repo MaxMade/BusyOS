@@ -279,6 +279,11 @@ impl Module for Acpi {
 
         Ok(token)
     }
+
+    /// See [`Module::name`].
+    fn name(&self) -> &'static str {
+        "acpi"
+    }
 }
 
 impl Acpi {

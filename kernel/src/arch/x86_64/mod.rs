@@ -12,3 +12,5 @@ pub mod rflags;
 pub mod idt;
 #[cfg(all(not(test), not(feature = "library")))]
 pub mod init;
+pub mod io;
+pub mod pit;
