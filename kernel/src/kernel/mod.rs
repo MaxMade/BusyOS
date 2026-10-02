@@ -11,6 +11,7 @@ pub mod hashmap;
 pub mod hashset;
 pub mod linked_list;
 pub mod locking;
+pub mod mpsc;
 pub mod printk;
 pub mod prologue_lock;
 pub mod spinlock;
