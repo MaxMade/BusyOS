@@ -1,7 +1,10 @@
+use crate::core_local;
+use crate::kernel::bitset::{self, BitSet};
 use crate::kernel::locking::PreviousToken;
 use core::fmt::{Debug, Display};
 use core::fmt::{LowerHex, UpperHex};
 use core::hash::Hash;
+use core::num::TryFromIntError;
 use core::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Shl, Shr, Sub};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +37,18 @@ pub trait CPU {
     /// `where Self::CPUID: ...` clause: the clause is self-referential —
     /// proving it requires normalising `Self::CPUID`, which brings in the
     /// very bounds being proven — and the solver gives up with `E0275`.
-    type CPUID: PartialEq + Eq + Ord + PartialOrd + Debug + Display + Clone + Copy;
+    type CPUID: PartialEq
+        + Eq
+        + Ord
+        + PartialOrd
+        + Debug
+        + Display
+        + Clone
+        + Copy
+        + TryFrom<usize, Error = TryFromIntError>
+        + Into<usize>;
+
+    const CPUID_BITS: usize;
 
     fn disable_interrupts<Token>(token: Token) -> InterruptState<Token>
     where
@@ -65,6 +79,18 @@ pub trait CPU {
     unsafe fn raw_disable_interrupts();
 }
 
+core_local! {
+    /// Id this core was handed by the bootloader.
+    pub static CPUID: <crate::arch::CPU as CPU>::CPUID;
+}
+
+/// A set of cores, one bit per [`CPUID`](CPU::CPUID) the architecture can
+/// name.
+pub type CPUSet = BitSet<
+    <crate::arch::CPU as CPU>::CPUID,
+    { bitset::words(<crate::arch::CPU as CPU>::CPUID_BITS) },
+>;
+
 /// Architecture-neutral view of an interrupt/exception vector number.
 ///
 /// Wraps whatever raw representation an architecture stores a vector in
@@ -74,7 +100,7 @@ pub trait CPU {
 /// assigns it.
 pub trait InterruptVector
 where
-    Self: Debug + Clone + Copy + PartialEq + Eq + Hash,
+    Self: Debug + Clone + Copy + PartialEq + Eq + Hash + Into<usize>,
 {
     /// How many vectors the architecture has.
     ///

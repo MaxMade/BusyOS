@@ -32,6 +32,8 @@ use crate::kernel::hashmap::{DefaultHashBuilder, HashMap};
 use crate::kernel::hashset::HashSet;
 use crate::kernel::linked_list::LinkedList;
 use crate::kernel::locking::{MemoryManagementLevelID, PreviousToken};
+use crate::kernel::mpsc::MPSC;
+use crate::kernel::spsc::SPSC;
 use crate::kernel::vec::Vec;
 use crate::utils::allocator::Allocator;
 
@@ -346,6 +348,12 @@ unsafe impl<K, V, A> TemplateValue for BTreeMap<K, V, A> where
 // SAFETY: as above.
 unsafe impl<T, A> TemplateValue for BTreeSet<T, A> where A: Allocator<MemoryManagementLevelID> + Copy
 {}
+
+// SAFETY: as argued above.
+unsafe impl<T, const N: usize> TemplateValue for MPSC<T, N> {}
+
+// SAFETY: as argued above.
+unsafe impl<T, const N: usize> TemplateValue for SPSC<T, N> {}
 
 // The two hashed collections are pinned to `DefaultHashBuilder`, the hasher
 // they use unless another one is named, rather than taking any `S: Copy`: a

@@ -36,6 +36,12 @@ impl TryFrom<usize> for CPUID {
     }
 }
 
+impl Into<usize> for CPUID {
+    fn into(self) -> usize {
+        self.0 as _
+    }
+}
+
 impl crate::arch::generic::cpu::CPU for CPU {
     /// Returns whether maskable interrupts are currently enabled.
     ///
@@ -83,6 +89,8 @@ impl crate::arch::generic::cpu::CPU for CPU {
     const KERNEL_STACK_SIZE: usize = 16 * 1024;
 
     type CPUID = CPUID;
+
+    const CPUID_BITS: usize = 256;
 }
 
 impl CPU {
@@ -202,6 +210,12 @@ impl Display for Exceptions {
 /// a vector number as the CPU and `entry.S` see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InterruptVector(u8);
+
+impl Into<usize> for InterruptVector {
+    fn into(self) -> usize {
+        self.0 as _
+    }
+}
 
 impl crate::arch::generic::cpu::InterruptVector for InterruptVector {
     /// The IDT holds 256 gates, and a vector is the `u8` that indexes it.
@@ -400,11 +414,12 @@ impl crate::arch::generic::cpu::InterruptStackFrame for InterruptStackFrame {
 ///
 /// Must only be called by an `entry.S` stub, immediately after it has pushed
 /// a complete [`InterruptStackFrame`] and with `state` pointing at it.
+#[cfg(all(not(test), not(feature = "library")))]
 #[unsafe(no_mangle)]
 extern "C" fn __interrupt_handler(vector: u64, state: *mut InterruptStackFrame) {
-    // TODO(@MaxMade): dispatch on `vector`/`state` instead of discarding them.
-    let _vector = vector;
-    let _state = unsafe { state.as_mut() };
+    use crate::{arch::generic::cpu::InterruptVector as _, kernel::handler::handler};
 
-    todo!();
+    let vector = InterruptVector::from_raw(vector as _);
+
+    handler(vector, state);
 }

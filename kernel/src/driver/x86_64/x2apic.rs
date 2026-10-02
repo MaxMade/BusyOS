@@ -26,9 +26,10 @@ use driver_macro::module;
 use crate::{
     arch::{
         InterruptVector,
-        generic::cpu::InterruptVector as GenericInterruptVector,
+        generic::cpu::{CPUID, CPUSet, InterruptVector as GenericInterruptVector},
         x86_64::{msr::MSR, pit::PIT},
     },
+    core_local,
     driver::{
         irq::{
             IRQCapable, IRQCapableDriver, InterruptController, InterruptControllerDriver,

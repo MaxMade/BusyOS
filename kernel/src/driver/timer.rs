@@ -20,8 +20,8 @@ use crate::{
     driver::irq::IRQCapable,
     kernel::{
         linked_list::LinkedList,
-        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken},
-        ticketlock::{DriverRWTicketlock, RWTicketlock},
+        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken, ReadGuard, Shared, Token},
+        ticketlock::{DriverRWTicketlock, RWTicketlock, RWTicketlockDriverID},
         time::NanoSeconds,
     },
     user::errno::{Errno, ToErrno},
@@ -130,6 +130,89 @@ impl Timers {
         };
 
         Ok(timers.release(token))
+    }
+
+    /// Walks every registered timer, in the order they registered.
+    ///
+    /// The returned [`TimersIter`] holds [`TIMERS`] shared for as long as it
+    /// lives, so no timer can register in the meantime, and yields a clone
+    /// of each handle rather than a reference into the list.
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and stored in the iterator. Hand the iterator
+    /// to [`TimersIter::release`] to unlock the list and get it back; merely
+    /// dropping the iterator leaves the list locked for good.
+    pub fn iter<Token>(token: Token) -> TimersIter<Token>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        let (timers, token) = TIMERS.acquire_shared(token);
+
+        TimersIter {
+            timers,
+            token,
+            next: 0,
+        }
+    }
+
+    /// Returns a handle on the timer the kernel is configured to use, or
+    /// [`None`] if no timer registered.
+    ///
+    /// That is the first one to register for now.
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned.
+    pub fn get<Token>(token: Token) -> (Option<TimerDriver>, Token)
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        // TODO(@MaxMade): Pick the timer named by the build configuration or
+        // the kernel command line, once either exists.
+        let (timers, token) = TIMERS.acquire_shared(token);
+        let driver = timers.0.front().cloned();
+
+        (driver, timers.release(token))
+    }
+}
+
+/// An iterator over every registered timer, see [`Timers::iter`].
+///
+/// Yields a clone of each [`TimerDriver`], which the caller may keep or drop
+/// as it likes, since [`Timers`] still holds a handle of its own.
+pub struct TimersIter<From>
+where
+    From: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+{
+    timers: ReadGuard<'static, Timers, RWTicketlock<RWTicketlockDriverID>>,
+    token: Token<RWTicketlockDriverID, From, Shared>,
+    next: usize,
+}
+
+impl<From> TimersIter<From>
+where
+    From: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+{
+    /// Unlocks [`TIMERS`] and returns the token given to [`Timers::iter`].
+    pub fn release(self) -> From {
+        self.timers.release(self.token)
+    }
+}
+
+impl<From> Iterator for TimersIter<From>
+where
+    From: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+{
+    type Item = TimerDriver;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // The guard cannot lend the list for longer than a call, so the
+        // position is kept as an index. A machine has a handful of timers
+        // at most, which keeps walking up to it again cheap.
+        let driver = self.timers.0.iter().nth(self.next).cloned();
+        self.next += 1;
+        driver
     }
 }
 

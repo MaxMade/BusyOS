@@ -3,6 +3,7 @@ use crate::arch::CPU;
 use crate::arch::CPUID;
 use crate::arch::Paging;
 use crate::arch::generic::cpu::CPU as _;
+use crate::arch::generic::cpu::CPUID;
 use crate::arch::generic::paging::Paging as _;
 use crate::arch::x86_64::gdt::Gdt;
 use crate::arch::x86_64::idt::Idt;
@@ -18,6 +19,8 @@ use crate::kernel::printk::LogLevel;
 use crate::mem::heap::Heap;
 use crate::mem::page_frames::EarlyPageFrames;
 use crate::mem::page_frames::PageFrames;
+
+use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 unsafe extern "C" {
     /// First byte of the `.percpu` template, defined by the linker script.
@@ -41,9 +44,6 @@ core_local! {
     ///
     /// which is the top of this core's stack, and grows down from there.
     pub static BOOT_STACK: Stack = Stack([0; CPU::KERNEL_STACK_SIZE]);
-
-    /// Id this core was handed by the bootloader.
-    pub static CPUID: CPUID;
 }
 
 /// Size of one boot stack, for the bootstrap stub to turn
@@ -115,13 +115,19 @@ pub unsafe extern "C" fn __init_gs(cpu_id: usize) {
     };
 }
 
+static RAW_CPUID: AtomicUsize = AtomicUsize::new(0);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn start() -> i32 {
     let root_token = unsafe { RootToken::forge() };
-    let (init_level, mut token) = InitLevel::enter(root_token);
+    let (init_level, token) = InitLevel::enter(root_token);
 
     // Get current cpu ID
-    let cpu_id = CPUID.with(|cpu_id| *cpu_id);
+    let (cpu_id, mut token) = CPUID.with_mut(token, |cpuid| {
+        let id = CPUID::try_from(RAW_CPUID.fetch_add(1, AtomicOrdering::Relaxed)).unwrap();
+        *cpuid = id;
+        id
+    });
 
     // TODO(@MaxMade): Remove me as soon as BOOTINFO is actually used.
     let bootinfo = unsafe { BOOTINFO.assume_init_ref() };

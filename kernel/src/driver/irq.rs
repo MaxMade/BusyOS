@@ -23,7 +23,8 @@ use crate::{
             CanAcquire, DriverLevelID, EpilogueLevelID, LockId, MemoryManagementLevelID,
             PreviousToken, PrologueLevelID,
         },
-        ticketlock::{PrologueRWTicketlock, RWTicketlock},
+        prologue_lock::PrologueReadGuard,
+        ticketlock::{PrologueRWTicketlock, RWTicketlock, RWTicketlockPrologueID},
     },
     user::errno::Errno,
 };
@@ -115,22 +116,38 @@ pub enum IRQCapableDriver {
     X2Apic(Arc<X2Apic>),
 }
 
+impl Module for IRQCapableDriver {
+    fn init<Token>(_token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Self: Sized,
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        panic!("IRQCapableDriver::init must never be called directly");
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            IRQCapableDriver::X2Apic(x2apic) => x2apic.name(),
+        }
+    }
+}
+
 // Every method below matches on the variant and forwards to the concrete
 // driver's `IRQCapable` method, handing `token` along. On an architecture
 // none of the variants exist for, each match is empty and diverges, and
 // `token` is discarded to keep it from reading as unused there.
-impl IRQCapableDriver {
+impl IRQCapable for IRQCapableDriver {
     /// Tells the device to start raising its interrupts, see
     /// [`IRQCapable::enable_irqs`].
     ///
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    pub fn enable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    fn enable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
-        let _ = token;
         match self {
             #[cfg(target_arch = "x86_64")]
             IRQCapableDriver::X2Apic(x2apic) => x2apic.enable_irqs(token),
@@ -143,7 +160,7 @@ impl IRQCapableDriver {
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    pub fn disable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    fn disable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
@@ -160,7 +177,7 @@ impl IRQCapableDriver {
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    pub fn irqs_enabled<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
+    fn irqs_enabled<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
@@ -176,7 +193,7 @@ impl IRQCapableDriver {
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    pub fn prologue<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
+    fn prologue<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
     where
         Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
     {
@@ -192,7 +209,7 @@ impl IRQCapableDriver {
     /// # Token
     ///
     /// The `token` is consumed and returned in both arms.
-    pub fn epilogue<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    fn epilogue<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
     {
@@ -306,6 +323,13 @@ impl InterruptVectorTable {
         };
 
         (driver, vector_table.release())
+    }
+
+    pub fn driver<Token>(vector: InterruptVector, token: Token) -> (Option<IRQCapableDriver>, Token)
+    where
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+    {
+        INTERRUPT_VECTOR_TABLE.driver_for(vector, token)
     }
 }
 
@@ -546,6 +570,97 @@ impl InterruptControllers {
         }
 
         Ok(ic.release())
+    }
+
+    /// Walks every registered interrupt controller.
+    ///
+    /// There is room for one today, see [`register`](Self::register), so the
+    /// walk yields that one or none.
+    ///
+    /// The returned [`InterruptControllersIter`] holds
+    /// [`INTERRUPT_CONTROLLERS`] shared, and with it interrupts masked, for
+    /// as long as it lives. It yields a clone of each handle rather than a
+    /// reference into the slot.
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and stored in the iterator. Hand the iterator
+    /// to [`InterruptControllersIter::release`] to unlock the slot and get
+    /// it back; merely dropping the iterator leaves the slot locked and
+    /// interrupts masked for good.
+    pub fn iter<Token>(token: Token) -> InterruptControllersIter<Token>
+    where
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+    {
+        InterruptControllersIter {
+            controllers: INTERRUPT_CONTROLLERS.0.acquire_shared(token),
+            next: 0,
+        }
+    }
+
+    /// Returns a handle on the interrupt controller the kernel is configured
+    /// to use, or [`None`] if no controller registered.
+    ///
+    /// That is the first one to register for now.
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned.
+    pub fn get<Token>(token: Token) -> (Option<InterruptControllerDriver>, Token)
+    where
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+    {
+        // TODO(@MaxMade): Pick the controller named by the build
+        // configuration or the kernel command line, once either exists.
+        let controllers = INTERRUPT_CONTROLLERS.0.acquire_shared(token);
+        let driver = controllers.clone();
+
+        (driver, controllers.release())
+    }
+}
+
+/// An iterator over every registered interrupt controller, see
+/// [`InterruptControllers::iter`].
+///
+/// Yields a clone of each [`InterruptControllerDriver`], which the caller may
+/// keep or drop as it likes, since [`InterruptControllers`] still holds a
+/// handle of its own.
+pub struct InterruptControllersIter<From>
+where
+    From: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+{
+    controllers: PrologueReadGuard<
+        'static,
+        Option<InterruptControllerDriver>,
+        RWTicketlock<RWTicketlockPrologueID>,
+        From,
+    >,
+    next: usize,
+}
+
+impl<From> InterruptControllersIter<From>
+where
+    From: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+{
+    /// Unlocks [`INTERRUPT_CONTROLLERS`], restores the interrupt state and
+    /// returns the token given to [`InterruptControllers::iter`].
+    pub fn release(self) -> From {
+        self.controllers.release()
+    }
+}
+
+impl<From> Iterator for InterruptControllersIter<From>
+where
+    From: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+{
+    type Item = InterruptControllerDriver;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Kept as an index so that the slot can become a list later without
+        // the iterator changing shape.
+        let driver = self.controllers.iter().nth(self.next).cloned();
+        self.next += 1;
+        driver
     }
 }
 

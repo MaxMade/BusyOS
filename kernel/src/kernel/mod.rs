@@ -8,6 +8,7 @@ pub mod boxed;
 pub mod btreemap;
 pub mod btreeset;
 pub mod core_local;
+pub mod handler;
 pub mod hashmap;
 pub mod hashset;
 pub mod linked_list;
