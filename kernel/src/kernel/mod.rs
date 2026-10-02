@@ -2,6 +2,7 @@
 pub mod panic;
 
 pub mod arc;
+pub mod bitset;
 pub mod bootinfo;
 pub mod boxed;
 pub mod btreemap;
