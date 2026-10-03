@@ -27,7 +27,11 @@ use crate::{
     arch::{
         InterruptVector,
         generic::cpu::{CPUID, CPUSet, InterruptVector as GenericInterruptVector},
-        x86_64::{msr::MSR, pit::PIT},
+        x86_64::{
+            cpuid::{CPUID as _, FeatureInformation},
+            msr::MSR,
+            pit::PIT,
+        },
     },
     core_local,
     driver::{
@@ -77,6 +81,99 @@ impl LapicID {
 
 /// The *LVT Timer Register* of the local APIC in x2APIC mode.
 ///
+/// The `IA32_APIC_BASE` MSR, which switches the local APIC on and selects
+/// its mode.
+///
+/// [`enabled`](Self::enabled) and [`x2apic`](Self::x2apic) together give the
+/// mode: both clear is disabled, only `enabled` is xAPIC, and both set is
+/// x2APIC. Every x2APIC register (MSRs `0x800` to `0x8FF`) raises `#GP` until
+/// both are set. Of the transitions between the modes only disabled to xAPIC
+/// to x2APIC is allowed going up, so the two bits are set one write at a
+/// time.
+#[bitfield(u64)]
+struct IA32ApicBase {
+    /// Bits 7-0: Reserved.
+    #[bits(8)]
+    __: u8,
+
+    /// Bit 8: Whether this core is the bootstrap processor (read-only).
+    #[bits(1, access = RO)]
+    pub bsp: bool,
+
+    /// Bit 9: Reserved.
+    #[bits(1)]
+    __: bool,
+
+    /// Bit 10: x2APIC mode enable (`EXTD`).
+    #[bits(1)]
+    pub x2apic: bool,
+
+    /// Bit 11: APIC global enable (`EN`).
+    #[bits(1)]
+    pub enabled: bool,
+
+    /// Bits 63-12: Physical page of the xAPIC register window, unused in
+    /// x2APIC mode. Left as the firmware set it.
+    #[bits(52)]
+    pub base: u64,
+}
+
+impl MSR<0x1B> for IA32ApicBase {
+    fn raw(&self) -> u64 {
+        self.0
+    }
+
+    unsafe fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// The *Spurious Interrupt Vector Register* of the local APIC in x2APIC
+/// mode.
+///
+/// Besides the vector a spurious interrupt arrives on, it holds the
+/// software enable of the local APIC. While that is clear, every local
+/// vector table entry stays masked whatever is written to it, so the timer
+/// could count but never raise its vector.
+#[bitfield(u32)]
+struct X2ApicSVR {
+    /// Bits 7-0: Spurious vector.
+    #[bits(8)]
+    pub vector: u8,
+
+    /// Bit 8: APIC software enable.
+    #[bits(1)]
+    pub enabled: bool,
+
+    /// Bits 11-9: Reserved.
+    #[bits(3)]
+    __: u8,
+
+    /// Bit 12: EOI-broadcast suppression.
+    #[bits(1)]
+    pub eoi_broadcast_suppression: bool,
+
+    /// Bits 31-13: Reserved.
+    #[bits(19)]
+    __: u32,
+}
+
+impl MSR<0x80F> for X2ApicSVR {
+    fn raw(&self) -> u64 {
+        self.0 as _
+    }
+
+    unsafe fn from_raw(value: u64) -> Self {
+        Self(value as _)
+    }
+}
+
+/// The vector a spurious interrupt of the local APIC arrives on.
+///
+/// The architecture recommends the top of the range, and a spurious
+/// interrupt needs no end of interrupt.
+const SPURIOUS_VECTOR: u8 = 0xFF;
+
 /// One of the local vector table entries, and the one that says what the
 /// core's own timer does when it expires: which vector it raises, whether
 /// that vector is masked, and in which of the three modes
@@ -386,6 +483,45 @@ impl Module for X2Apic {
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
         let mut token = token;
+
+        // A core without x2APIC has no driver here. Not an error: the
+        // driver simply does not register.
+        //
+        // SAFETY: leaf 1 exists on every x86_64 processor.
+        let features = unsafe { FeatureInformation::read() };
+        if !features.ecx.x2apic() {
+            return Ok(token);
+        }
+
+        // Switch the local APIC into x2APIC mode, through xAPIC if the
+        // firmware left it disabled, since going straight from disabled to
+        // x2APIC raises `#GP`. Until this is done every x2APIC register
+        // raises `#GP` as well.
+        //
+        // SAFETY: the processor reports x2APIC support above, and the steps
+        // follow the allowed transitions.
+        unsafe {
+            let mut apic_base = IA32ApicBase::read();
+            if !apic_base.enabled() {
+                apic_base.set_enabled(true);
+                apic_base.write();
+            }
+            if !apic_base.x2apic() {
+                apic_base.set_x2apic(true);
+                apic_base.write();
+            }
+        }
+
+        // Software-enable the local APIC, without which no local vector table
+        // entry can be unmasked.
+        //
+        // SAFETY: the local APIC is in x2APIC mode from here on.
+        unsafe {
+            let mut svr = X2ApicSVR::read();
+            svr.set_vector(SPURIOUS_VECTOR);
+            svr.set_enabled(true);
+            svr.write();
+        }
 
         let state = State {};
 
