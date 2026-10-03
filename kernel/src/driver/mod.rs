@@ -9,6 +9,8 @@
 //! - [`x86_64`] holds the drivers that only exist on `x86_64`.
 
 pub mod acpi;
+pub mod console;
+pub mod framebuffer;
 pub mod irq;
 pub mod module;
 pub mod timer;

@@ -1,9 +1,13 @@
 use core::array;
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
 
 use crate::arch::Bootinfo as ArchBootinfo;
 use crate::arch::generic::paging::{PhysicalAddress, VirtualAddress};
+use crate::driver::framebuffer::{
+    Configuration as FramebufferConfiguration, Format as FramebufferFormat,
+};
 use crate::utils::range_tree::Range;
 
 #[repr(C)]
@@ -63,6 +67,8 @@ pub struct Bootinfo {
 
     pub memory_ranges: [Range<PhysicalAddress<c_void>, usize>; 64],
 
+    pub framebuffer_config: FramebufferConfiguration,
+
     /// Architecture-specific boot information
     pub arch_bootinfo: ArchBootinfo,
 }
@@ -87,9 +93,56 @@ impl Default for Bootinfo {
             kernel_percpu_size: 0,
             num_cpus: 0,
             memory_ranges: array::from_fn(|_| Range::new(PhysicalAddress::null(), 0)),
+            framebuffer_config: FramebufferConfiguration::new(
+                PhysicalAddress::null(),
+                0,
+                0,
+                0,
+                FramebufferFormat::Rgb,
+            ),
         }
     }
 }
 
+/// Storage for the boot information, which the bootloader fills in from the
+/// outside.
+///
+/// The bootloader finds [`BOOTINFO`] by its symbol and writes a [`Bootinfo`]
+/// into it before the kernel runs. The compiler cannot see that write, so a
+/// plain immutable `static` would be one it may assume still holds the
+/// all-zero value it was declared with, and an optimised build does fold its
+/// reads to zero. The [`UnsafeCell`] tells the compiler that the contents can
+/// change behind its back, which keeps every read a real load.
+///
+/// `#[repr(transparent)]` keeps the symbol pointing at a plain [`Bootinfo`],
+/// which is what the bootloader writes.
+#[repr(transparent)]
+pub struct BootinfoCell(UnsafeCell<MaybeUninit<Bootinfo>>);
+
+// SAFETY: the bootloader writes the boot information before the kernel runs,
+// and the kernel only ever reads it, so every core sees the same unchanging
+// value.
+unsafe impl Sync for BootinfoCell {}
+
+impl BootinfoCell {
+    /// The boot information the bootloader handed over.
+    ///
+    /// # Safety
+    ///
+    /// The bootloader must have filled it in, which is the case from the
+    /// kernel's first instruction on, and nothing may write to it while the
+    /// returned reference lives.
+    pub unsafe fn assume_init_ref(&self) -> &Bootinfo {
+        // SAFETY: see the function's contract.
+        unsafe { (*self.0.get()).assume_init_ref() }
+    }
+}
+
+/// The boot information, written by the bootloader before the kernel runs.
+///
+/// Placed in `.data` on purpose. Being all zeros, it would otherwise land in
+/// `.bss`, which the startup code is entitled to zero after the bootloader
+/// has written into it.
 #[unsafe(no_mangle)]
-pub static BOOTINFO: MaybeUninit<Bootinfo> = MaybeUninit::zeroed();
+#[unsafe(link_section = ".data.bootinfo")]
+pub static BOOTINFO: BootinfoCell = BootinfoCell(UnsafeCell::new(MaybeUninit::zeroed()));

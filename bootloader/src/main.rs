@@ -3,6 +3,7 @@
 
 pub mod arch;
 pub mod elf_loader;
+pub mod gop;
 pub mod memory_map;
 pub mod paging;
 

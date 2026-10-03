@@ -5,12 +5,16 @@ use busyos::{
         CPU,
         generic::paging::{Paging as _, PhysicalAddress, VirtualAddress},
     },
+    driver::framebuffer::{Configuration as FramebufferConfiguration, Format as FramebufferFormat},
     kernel::{
         bootinfo::Bootinfo,
         locking::{CanAcquire, PreviousToken, level::Epilogue},
     },
 };
-use uefi::table::cfg::ConfigTableEntry;
+use uefi::{
+    proto::console::gop::{GraphicsOutput, PixelFormat},
+    table::cfg::ConfigTableEntry,
+};
 
 use crate::paging::Paging;
 
@@ -64,6 +68,42 @@ impl crate::arch::generic::handover::HandOver for HandOver {
 
         // Prepare temporary mapping for jumping to higher half kernel
         let (paging, token) = crate::paging::prepare_handover(token);
+
+        // Get framebuffer configuration
+        let handle = match uefi::boot::get_handle_for_protocol::<GraphicsOutput>() {
+            Ok(handle) => handle,
+            Err(error) => panic!(
+                "Unable to get handle for Graphic Output Protocol: {}",
+                error
+            ),
+        };
+
+        let mut gop = match uefi::boot::open_protocol_exclusive::<GraphicsOutput>(handle) {
+            Ok(gop) => gop,
+            Err(error) => panic!(
+                "Unable to open protocol for Graphic Output Protocol: {}",
+                error
+            ),
+        };
+
+        let info = gop.current_mode_info();
+        let (width, height) = info.resolution();
+        let stride = info.stride();
+
+        let format = match info.pixel_format() {
+            PixelFormat::Rgb => FramebufferFormat::Rgb,
+            PixelFormat::Bgr => FramebufferFormat::Bgr,
+            _ => panic!("Unable to determine Framebuffer configuration"),
+        };
+
+        let addr = gop.frame_buffer().as_mut_ptr();
+        bootinfo.framebuffer_config = FramebufferConfiguration::new(
+            PhysicalAddress::new(addr as _),
+            height,
+            width,
+            stride,
+            format,
+        );
 
         (Self { paging, entry }, token)
     }

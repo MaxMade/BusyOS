@@ -108,6 +108,7 @@ use core::{
 };
 
 use crate::{
+    driver::console::{ConsoleOutput, Consoles},
     kernel::locking::{CanAcquire, DriverLevelID, LockId, MemoryManagementLevelID, PreviousToken},
     mem::heap::Heap,
     utils::allocator::Allocator,
@@ -268,6 +269,7 @@ impl LockFreeStack {
     /// before it is even returned. Note that an empty stack does not have a
     /// null head word — the counter stays behind — so emptiness is the address
     /// half being null.
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         Self::mask_cnt(self.head.load(Ordering::Acquire)).is_null()
     }
@@ -671,6 +673,15 @@ impl MPSC {
     /// There is one consumer: no other core may call this, and this must not be
     /// re-entered from an interrupt that hit a call already in progress. Two
     /// consumers would share `tail` and could hand the same entry out twice.
+    /// Whether every ticket handed out so far has been consumed.
+    ///
+    /// A snapshot, safe to call from anywhere. A producer between taking its
+    /// ticket and depositing its pointer already counts as non-empty here.
+    fn is_empty(&self) -> bool {
+        // SeqCst, pairing with the flag in `drain`, see there.
+        self.tail.load(Ordering::SeqCst) >= self.head.load(Ordering::SeqCst)
+    }
+
     #[must_use = "dropping the entry leaks its buffer, and dropping the flag \
                   loses the record of a gap"]
     unsafe fn pop(&self) -> (Option<NonNull<u8>>, bool) {
@@ -748,6 +759,20 @@ pub fn enabled(level: LogLevel) -> bool {
 static MESSAGE_ALLOCATOR: LockFreeAllocator = LockFreeAllocator::new();
 
 static MESSAGE_QUEUE: MPSC = MPSC::new();
+
+/// Set while a core drains [`MESSAGE_QUEUE`] to the console.
+///
+/// [`MPSC::pop`] allows a single consumer, and any number of cores may call
+/// [`__printk`] at once, so the drain is taken by whoever sets this first. It
+/// is a flag to try rather than a lock to wait for: a core that finds it set
+/// leaves its message to the core draining, and an epilogue that logs while
+/// its own core is in the middle of a drain returns instead of re-entering
+/// it.
+static DRAINING: AtomicBool = AtomicBool::new(false);
+
+/// What is written to the console where messages were lost, see
+/// [`MPSC::pop`].
+const GAP_MARKER: &str = "[... messages lost ...]\n";
 
 /// The low bits of a buffer pointer, which carry the size class of its block.
 ///
@@ -913,9 +938,10 @@ pub fn __printk_lock_free<S: AsRef<str>>(message: S) {
 /// # Token
 ///
 /// The bound is `Driver`, which is stricter than the `MemoryManagement` the
-/// allocator itself needs — it is the level draining the queue to a console will
-/// want. The token is consumed and returned whether or not the message got
-/// through, so a caller threads it on regardless.
+/// allocator itself needs: after queueing, this drains the queue to the
+/// console, see [`drain`], and the console's lock is at that level. The token
+/// is consumed and returned whether or not the message got through, so a
+/// caller threads it on regardless.
 ///
 /// Not for an interrupt handler or the panic path: it can block on the heap's
 /// lock. Use [`__printk_lock_free`] there.
@@ -932,12 +958,87 @@ where
         enqueue(block, msg);
     }
 
-    // TODO(@MaxMade): drain `MESSAGE_QUEUE` to the console from here once the
-    // driver interface is ready — that is what the `Driver` level in the bound
-    // above is held for. Remember to `untag` each entry before reading it, to
-    // free it afterwards, and to mark the gap when `pop` reports one.
+    drain(token)
+}
 
-    token
+/// Writes every message in [`MESSAGE_QUEUE`] to the console, oldest first,
+/// and frees its buffer.
+///
+/// Leaves the queue alone while no console has registered, so that what was
+/// logged during early boot shows up once one has. The queue overwrites its
+/// oldest entries in the meantime, and the gap is marked when the drain
+/// finally happens.
+///
+/// Returns at once if another drain is under way, see [`DRAINING`]. That
+/// drain looks at the queue again after it lets go of the flag, so a message
+/// queued while it was running is not left behind.
+///
+/// A message the console fails to show is dropped all the same: there is
+/// nowhere left to report the failure to.
+///
+/// # Token
+///
+/// The `token` is consumed and returned. It has to reach the `Driver` level,
+/// which is what the console's own lock is at.
+fn drain<Token>(token: Token) -> Token
+where
+    Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+{
+    let (console, mut token) = Consoles::get(token);
+    let Some(console) = console else {
+        return token;
+    };
+
+    loop {
+        // SeqCst on the flag and on the queue check below: a producer that
+        // queued its message and then found the flag set relies on this drain
+        // seeing that message when it looks again after letting go.
+        if DRAINING.swap(true, Ordering::SeqCst) {
+            return token;
+        }
+
+        loop {
+            // SAFETY: holding `DRAINING` makes this the only consumer, on any
+            // core, and a drain is never re-entered: a nested one finds the
+            // flag set and returns above.
+            let (entry, overwritten) = unsafe { MESSAGE_QUEUE.pop() };
+
+            if overwritten {
+                token = match console.write(&GAP_MARKER, token) {
+                    Ok((_, token)) | Err((_, token)) => token,
+                };
+            }
+
+            let Some(entry) = entry else {
+                break;
+            };
+
+            let (block, size) = untag(entry);
+
+            // SAFETY: the queue has given the buffer up, so it is this
+            // drain's alone, and the tag names the size of the block it was
+            // allocated as.
+            let bytes = unsafe { core::slice::from_raw_parts(block.as_ptr(), size) };
+
+            // `enqueue` wrote a whole `&str` followed by the only NUL in it.
+            let len = bytes.iter().position(|&c| c == 0).unwrap_or(size);
+            if let Ok(msg) = str::from_utf8(&bytes[..len]) {
+                token = match console.write(&msg, token) {
+                    Ok((_, token)) | Err((_, token)) => token,
+                };
+            }
+
+            // SAFETY: as above, the buffer is out of the queue and nobody else
+            // holds it.
+            unsafe { MESSAGE_ALLOCATOR.deallocate(NonNull::slice_from_raw_parts(block, size)) };
+        }
+
+        DRAINING.store(false, Ordering::SeqCst);
+
+        if MESSAGE_QUEUE.is_empty() {
+            return token;
+        }
+    }
 }
 
 /// Bytes of stack a [`printk!`] formats into.

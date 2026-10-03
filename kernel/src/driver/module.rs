@@ -1,5 +1,5 @@
 use crate::{
-    driver::acpi::acpi::Acpi,
+    driver::{acpi::acpi::Acpi, framebuffer::Framebuffer},
     kernel::{
         arc::Arc,
         linked_list::LinkedList,
@@ -152,6 +152,9 @@ pub trait Module: Send + Sync {
 pub enum ModuleDriver {
     /// The ACPI driver, see [`Acpi`].
     Acpi(Arc<Acpi>),
+
+    /// The framebuffer driver, see [`Framebuffer`].
+    Framebuffer(Arc<Framebuffer>),
 
     #[cfg(target_arch = "x86_64")]
     /// The x2APIC driver, see [`X2Apic`].
