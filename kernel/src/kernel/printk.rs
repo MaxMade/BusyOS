@@ -1180,6 +1180,53 @@ impl Write for Buffer {
     }
 }
 
+/// Formats `args` and queues the message through [`__printk_lock_free`], or
+/// shows it through [`__printk_emergency`] at [`LogLevel::Panic`].
+///
+/// What [`printk!`] calls without a token. Never inlined, on purpose: the
+/// [`Buffer`] the message is formatted into is [`BUFFER_SIZE`] bytes, and
+/// here it only takes up stack for the duration of the call. Expanded into
+/// the caller instead, it would sit in the caller's frame for as long as the
+/// caller runs, once for every `printk!` in it.
+#[inline(never)]
+pub fn __printk_fmt_lock_free(level: LogLevel, args: Arguments<'_>) {
+    let mut buffer = Buffer::new();
+
+    buffer.format(args);
+
+    if level == LogLevel::Panic {
+        __printk_emergency(buffer.as_str());
+    }
+
+    __printk_lock_free(buffer.as_str());
+}
+
+/// Formats `args` and queues the message through [`__printk`], or shows it
+/// through [`__printk_emergency`] at [`LogLevel::Panic`].
+///
+/// What [`printk!`] calls with a token that reaches the `Driver` level, see
+/// [`Select`]. Never inlined, for the reason [`__printk_fmt_lock_free`]
+/// gives.
+///
+/// # Token
+///
+/// The `token` is consumed and returned, as by [`__printk`].
+#[inline(never)]
+pub fn __printk_fmt<Token>(level: LogLevel, args: Arguments<'_>, token: Token) -> Token
+where
+    Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+{
+    let mut buffer = Buffer::new();
+
+    buffer.format(args);
+
+    if level == LogLevel::Panic {
+        __printk_emergency(buffer.as_str());
+    }
+
+    __printk(buffer.as_str(), token)
+}
+
 /// Picks the path a [`printk!`] with a token may take.
 ///
 /// [`__printk`] wants a token that reaches the `Driver` level, which is what
@@ -1218,29 +1265,32 @@ impl<T> Select<T> {
 
 /// The path for a token that reaches the `Driver` level. See [`Select`].
 pub trait ViaDriver<T> {
-    /// Queues `msg` through [`__printk`], returning the token.
-    fn emit(self, msg: &str, token: T) -> T;
+    /// Formats and queues the message through [`__printk_fmt`], returning
+    /// the token.
+    fn emit(self, level: LogLevel, args: Arguments<'_>, token: T) -> T;
 }
 
 impl<T> ViaDriver<T> for Select<T>
 where
     T: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
 {
-    fn emit(self, msg: &str, token: T) -> T {
-        __printk(msg, token)
+    #[inline(always)]
+    fn emit(self, level: LogLevel, args: Arguments<'_>, token: T) -> T {
+        __printk_fmt(level, args, token)
     }
 }
 
 /// The path for every other token. See [`Select`].
 pub trait ViaLockFree<T> {
-    /// Queues `msg` through [`__printk_lock_free`], handing the token straight
-    /// back untouched.
-    fn emit(self, msg: &str, token: T) -> T;
+    /// Formats and queues the message through [`__printk_fmt_lock_free`],
+    /// handing the token straight back untouched.
+    fn emit(self, level: LogLevel, args: Arguments<'_>, token: T) -> T;
 }
 
 impl<T> ViaLockFree<T> for &Select<T> {
-    fn emit(self, msg: &str, token: T) -> T {
-        __printk_lock_free(msg);
+    #[inline(always)]
+    fn emit(self, level: LogLevel, args: Arguments<'_>, token: T) -> T {
+        __printk_fmt_lock_free(level, args);
 
         token
     }
@@ -1251,6 +1301,10 @@ impl<T> ViaLockFree<T> for &Select<T> {
 ///
 /// Two arms: without a token it is an expression of type `()`, with one it
 /// evaluates to the token, so that a caller can thread it on.
+///
+/// Only the level check is expanded at the call site. Formatting happens in
+/// [`__printk_fmt`] or [`__printk_fmt_lock_free`], which are never inlined,
+/// so that the caller's frame does not carry a [`Buffer`].
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __printk_emit {
@@ -1258,15 +1312,7 @@ macro_rules! __printk_emit {
         let level = $level;
 
         if $crate::kernel::printk::enabled(level) {
-            let mut buffer = $crate::kernel::printk::Buffer::new();
-
-            buffer.format($args);
-
-            if level == $crate::kernel::printk::LogLevel::Panic {
-                $crate::kernel::printk::__printk_emergency(buffer.as_str());
-            }
-
-            $crate::kernel::printk::__printk_lock_free(buffer.as_str());
+            $crate::kernel::printk::__printk_fmt_lock_free(level, $args);
         }
     }};
 
@@ -1280,15 +1326,7 @@ macro_rules! __printk_emit {
         let token = $token;
 
         if $crate::kernel::printk::enabled(level) {
-            let mut buffer = $crate::kernel::printk::Buffer::new();
-
-            buffer.format($args);
-
-            if level == $crate::kernel::printk::LogLevel::Panic {
-                $crate::kernel::printk::__printk_emergency(buffer.as_str());
-            }
-
-            $crate::kernel::printk::Select::for_token(&token).emit(buffer.as_str(), token)
+            $crate::kernel::printk::Select::for_token(&token).emit(level, $args, token)
         } else {
             token
         }
