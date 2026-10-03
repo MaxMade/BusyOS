@@ -4,6 +4,7 @@ pub mod panic;
 pub mod arc;
 pub mod bitset;
 pub mod bootinfo;
+pub mod bounded_buffer;
 pub mod boxed;
 pub mod btreemap;
 pub mod btreeset;

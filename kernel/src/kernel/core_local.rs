@@ -26,6 +26,7 @@ use core::ffi::c_void;
 
 use crate::arch::CPU;
 use crate::arch::generic::cpu::{CPU as _, InterruptFlag};
+use crate::kernel::bounded_buffer::{BoundedBuffer, Mode};
 use crate::kernel::btreemap::BTreeMap;
 use crate::kernel::btreeset::BTreeSet;
 use crate::kernel::hashmap::{DefaultHashBuilder, HashMap};
@@ -354,6 +355,9 @@ unsafe impl<T, const N: usize> TemplateValue for MPSC<T, N> {}
 
 // SAFETY: as argued above.
 unsafe impl<T, const N: usize> TemplateValue for SPSC<T, N> {}
+
+// SAFETY: as argued above.
+unsafe impl<T, const N: usize, M: Mode> TemplateValue for BoundedBuffer<T, N, M> {}
 
 // The two hashed collections are pinned to `DefaultHashBuilder`, the hasher
 // they use unless another one is named, rather than taking any `S: Copy`: a
