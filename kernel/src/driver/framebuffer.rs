@@ -442,4 +442,23 @@ impl ConsoleOutput for Framebuffer {
 
         Ok(token)
     }
+
+    /// Draws `buffer` at the cursor without taking the lock, which the
+    /// panicking code may hold.
+    unsafe fn emergency_write<S>(&self, buffer: &S)
+    where
+        S: AsRef<str>,
+    {
+        let (columns, rows) = State::text_size(&self.configuration);
+        if columns == 0 || rows == 0 {
+            return;
+        }
+
+        // SAFETY: by the trait's contract nothing else touches the state
+        // from here on. A write the panic interrupted halfway is abandoned,
+        // which at worst leaves the cursor or one glyph off.
+        let state = unsafe { &mut *self.state.data_ptr() };
+
+        state.write_str(buffer.as_ref(), &self.configuration);
+    }
 }

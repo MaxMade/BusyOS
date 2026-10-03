@@ -649,6 +649,17 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
                 self.data.into_inner()
             }
 
+            /// Returns a raw pointer to the underlying data, without locking.
+            ///
+            /// Like [`UnsafeCell::get`](::core::cell::UnsafeCell::get), the
+            /// call itself is safe and the pointer is valid for as long as the
+            /// lock is. Dereferencing it while somebody may hold the lock is
+            /// a data race, which only a caller that has nothing left to lose,
+            /// such as the panic path, may accept.
+            pub const fn data_ptr(&self) -> *mut T {
+                self.data.get()
+            }
+
             /// Returns a mutable reference to the underlying data.
             ///
             /// Since this call borrows the Mutex mutably, no actual locking

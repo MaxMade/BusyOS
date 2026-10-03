@@ -108,6 +108,7 @@ use core::{
 };
 
 use crate::{
+    arch::{CPU, generic::cpu::CPU as _},
     driver::console::{ConsoleOutput, Consoles},
     kernel::locking::{CanAcquire, DriverLevelID, LockId, MemoryManagementLevelID, PreviousToken},
     mem::heap::Heap,
@@ -1018,11 +1019,7 @@ where
             // SAFETY: the queue has given the buffer up, so it is this
             // drain's alone, and the tag names the size of the block it was
             // allocated as.
-            let bytes = unsafe { core::slice::from_raw_parts(block.as_ptr(), size) };
-
-            // `enqueue` wrote a whole `&str` followed by the only NUL in it.
-            let len = bytes.iter().position(|&c| c == 0).unwrap_or(size);
-            if let Ok(msg) = str::from_utf8(&bytes[..len]) {
+            if let Some(msg) = unsafe { message(block, size) } {
                 token = match console.write(&msg, token) {
                     Ok((_, token)) | Err((_, token)) => token,
                 };
@@ -1039,6 +1036,86 @@ where
             return token;
         }
     }
+}
+
+/// The message in a buffer [`enqueue`] filled: the string up to its NUL.
+///
+/// [`None`] if the bytes are not UTF-8, which `enqueue` never writes.
+///
+/// # Safety
+///
+/// `block` must be a block of `size` bytes that came out of
+/// [`MESSAGE_QUEUE`], and stay untouched for as long as the string is used.
+unsafe fn message<'a>(block: NonNull<u8>, size: usize) -> Option<&'a str> {
+    // SAFETY: see the function's contract.
+    let bytes = unsafe { core::slice::from_raw_parts(block.as_ptr(), size) };
+
+    // `enqueue` wrote a whole `&str` followed by the only NUL in it.
+    let len = bytes.iter().position(|&c| c == 0).unwrap_or(size);
+
+    str::from_utf8(&bytes[..len]).ok()
+}
+
+/// Shows everything still queued and then `message` on the console,
+/// bypassing every lock, and halts the calling core.
+///
+/// What [`printk!`] and [`printkln!`] do at [`LogLevel::Panic`], and the way
+/// out of the panic path. Interrupts are masked first, the console is looked
+/// up without [`Consoles`]'s lock, and two newlines set the output apart
+/// from what was on the console. Then [`MESSAGE_QUEUE`] is drained, so that
+/// the last messages before the panic are not lost, and `message` comes last.
+/// Everything goes through
+/// [`emergency_write`](ConsoleOutput::emergency_write). Without a console
+/// there is nowhere to show anything, and the core simply halts.
+///
+/// The drain takes the consumer side of the queue regardless of
+/// [`DRAINING`]: a drain the panic interrupted is on this core and never
+/// runs again. At worst the one message it had already taken out is lost.
+/// Buffers are not freed, since nothing runs afterwards, and the allocator
+/// may be what panicked.
+pub fn __printk_emergency<S: AsRef<str>>(message: S) -> ! {
+    // SAFETY: this core halts at the end, so the interrupt state never has to
+    // be restored.
+    unsafe { CPU::raw_disable_interrupts() };
+
+    // TODO(@MaxMade): Stop the other cores once there are any: send every
+    // other core a dedicated IPI whose handler acknowledges and halts, wait
+    // for all acknowledgements with a timeout, and then print.
+
+    // SAFETY: interrupts are masked on the only core there is, so nothing
+    // registers a console meanwhile.
+    if let Some(console) = unsafe { Consoles::emergency_get() } {
+        // SAFETY for every `emergency_write` below: interrupts are masked on
+        // the only core there is, so nothing else writes to the console.
+        unsafe { console.emergency_write(&"\n\n") };
+
+        loop {
+            // SAFETY: the only other consumer is a drain this panic
+            // interrupted, which never resumes, see above.
+            let (entry, overwritten) = unsafe { MESSAGE_QUEUE.pop() };
+
+            if overwritten {
+                unsafe { console.emergency_write(&GAP_MARKER) };
+            }
+
+            let Some(entry) = entry else {
+                break;
+            };
+
+            let (block, size) = untag(entry);
+
+            // SAFETY: the queue has given the buffer up, and it is never
+            // freed.
+            if let Some(msg) = unsafe { self::message(block, size) } {
+                unsafe { console.emergency_write(&msg) };
+            }
+        }
+
+        unsafe { console.emergency_write(&message) };
+    }
+
+    // SAFETY: there is nothing left to run.
+    unsafe { CPU::halt() }
 }
 
 /// Bytes of stack a [`printk!`] formats into.
@@ -1178,10 +1255,16 @@ impl<T> ViaLockFree<T> for &Select<T> {
 #[macro_export]
 macro_rules! __printk_emit {
     ($level:expr, $args:expr) => {{
-        if $crate::kernel::printk::enabled($level) {
+        let level = $level;
+
+        if $crate::kernel::printk::enabled(level) {
             let mut buffer = $crate::kernel::printk::Buffer::new();
 
             buffer.format($args);
+
+            if level == $crate::kernel::printk::LogLevel::Panic {
+                $crate::kernel::printk::__printk_emergency(buffer.as_str());
+            }
 
             $crate::kernel::printk::__printk_lock_free(buffer.as_str());
         }
@@ -1193,12 +1276,17 @@ macro_rules! __printk_emit {
         #[allow(unused_imports)]
         use $crate::kernel::printk::{ViaDriver as _, ViaLockFree as _};
 
+        let level = $level;
         let token = $token;
 
-        if $crate::kernel::printk::enabled($level) {
+        if $crate::kernel::printk::enabled(level) {
             let mut buffer = $crate::kernel::printk::Buffer::new();
 
             buffer.format($args);
+
+            if level == $crate::kernel::printk::LogLevel::Panic {
+                $crate::kernel::printk::__printk_emergency(buffer.as_str());
+            }
 
             $crate::kernel::printk::Select::for_token(&token).emit(buffer.as_str(), token)
         } else {
@@ -1225,6 +1313,10 @@ macro_rules! __printk_emit {
 /// A message is formatted on the stack, into [`BUFFER_SIZE`] bytes, and cut on a
 /// character boundary if it does not fit. Nothing is formatted at all when the
 /// level is not being logged.
+///
+/// At [`LogLevel::Panic`] the message is not queued: it goes to the console
+/// straight away through [`__printk_emergency`], after whatever was still
+/// queued, and the calling core halts. That needs neither a token nor a lock.
 ///
 /// [`printkln!`] is the same with a newline on the end.
 #[macro_export]
@@ -1669,8 +1761,8 @@ mod tests {
     /// the contract; panicking on the logging path would not be.
     #[test]
     fn printk_with_no_memory_drops_the_message() {
-        printk!(LogLevel::Panic, "no memory to put {} in", "this");
-        printkln!(LogLevel::Panic, "nor {}", "this");
+        printk!(LogLevel::Error, "no memory to put {} in", "this");
+        printkln!(LogLevel::Error, "nor {}", "this");
     }
 
     /// Both forms compile with a token that reaches the `Driver` level, and the

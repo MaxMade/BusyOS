@@ -33,6 +33,23 @@ pub trait ConsoleOutput: Module {
         S: AsRef<str>,
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken;
 
+    /// Shows `buffer` at the console's cursor without taking any lock.
+    ///
+    /// For the panic path, see
+    /// [`__printk_emergency`](crate::kernel::printk::__printk_emergency).
+    /// Takes no lock and no token: whatever lock the console normally uses
+    /// may be held, possibly by the very code that panicked, so `buffer` is
+    /// written over whatever state the console is in.
+    ///
+    /// # Safety
+    ///
+    /// Nothing else may be writing to the console: interrupts have to be
+    /// masked, and no other core may be running. Only for when nothing is
+    /// going to run afterwards anyway.
+    unsafe fn emergency_write<S>(&self, buffer: &S)
+    where
+        S: AsRef<str>;
+
     /// Blanks the console and moves its cursor back to the start.
     ///
     /// # Token
@@ -91,6 +108,21 @@ impl ConsoleOutput for ConsoleOutputDriver {
     {
         match self {
             ConsoleOutputDriver::Framebuffer(framebuffer) => framebuffer.write(buffer, token),
+        }
+    }
+
+    /// Forwards to the concrete console, see
+    /// [`ConsoleOutput::emergency_write`].
+    unsafe fn emergency_write<S>(&self, buffer: &S)
+    where
+        S: AsRef<str>,
+    {
+        match self {
+            // SAFETY: the caller's contract is the one of the concrete
+            // console.
+            ConsoleOutputDriver::Framebuffer(framebuffer) => unsafe {
+                framebuffer.emergency_write(buffer)
+            },
         }
     }
 
@@ -186,6 +218,25 @@ impl Consoles {
         let driver = consoles.0.front().cloned();
 
         (driver, consoles.release(token))
+    }
+
+    /// Returns the console [`get`](Self::get) would, without taking the
+    /// lock.
+    ///
+    /// For the panic path, which has no token and may have panicked while
+    /// holding [`CONSOLES`].
+    ///
+    /// # Safety
+    ///
+    /// Nothing may be registering a console at the same time. That holds
+    /// with interrupts masked on the only core there is.
+    pub unsafe fn emergency_get() -> Option<ConsoleOutputDriver> {
+        // SAFETY: see the function's contract. A registration the panic
+        // interrupted halfway has either linked its node or not, and the
+        // front of the list is valid either way.
+        let consoles = unsafe { &*CONSOLES.data_ptr() };
+
+        consoles.0.front().cloned()
     }
 }
 

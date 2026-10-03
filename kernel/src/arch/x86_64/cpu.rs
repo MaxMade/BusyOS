@@ -82,6 +82,21 @@ impl crate::arch::generic::cpu::CPU for CPU {
         }
     }
 
+    /// Masks maskable interrupts with `CLI` and halts with `HLT`, forever.
+    ///
+    /// `HLT` alone is not the end: a non-maskable interrupt, a system
+    /// management interrupt or an INIT/SIPI still wakes the core with
+    /// interrupts masked, and execution would carry on after the
+    /// instruction. So the `HLT` sits in a loop.
+    #[inline]
+    unsafe fn halt() -> ! {
+        loop {
+            unsafe {
+                core::arch::asm!("cli", "hlt", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
     /// Required minimum stack alignment.
     const STACK_ALIGNMENT: usize = 16;
 

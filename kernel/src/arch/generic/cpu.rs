@@ -50,6 +50,18 @@ pub trait CPU {
 
     const CPUID_BITS: usize;
 
+    /// Stops the calling core for good, with interrupts masked.
+    ///
+    /// For the end of the panic path and anywhere else nothing sensible is
+    /// left to do.
+    ///
+    /// # Safety
+    ///
+    /// Whatever the core holds stays held: locks are never released and work
+    /// it took on is never finished, so other cores waiting on either wait
+    /// forever.
+    unsafe fn halt() -> !;
+
     fn disable_interrupts<Token>(token: Token) -> InterruptState<Token>
     where
         Token: PreviousToken,
