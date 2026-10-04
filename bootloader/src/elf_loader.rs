@@ -8,7 +8,7 @@ use busyos::{
         REGULAR_PAGE_SIZE,
         generic::paging::{PhysicalAddress, VirtualAddress},
     },
-    kernel::bootinfo::Bootinfo,
+    kernel::bootinfo::{Bootinfo, KernelSymbol},
 };
 use elf::{ElfBytes, endian::AnyEndian};
 use uefi::proto::{media::file::File, pi::mp::MpServices};
@@ -402,6 +402,36 @@ impl ELF {
         bootinfo.kernel_percpu_size =
             percpu_stride * num_cpus.total.saturating_sub(1) + percpu_size;
         bootinfo.num_cpus = num_cpus.total;
+
+        // Hand the kernel its symbol table, ready to search: only the symbols
+        // it defines itself, since an undefined one has no address in it, and
+        // only those with a name, which leaves out the section symbols. The
+        // names stay where they are, in the ELF file, which is not freed.
+        let mut symbols = Vec::new();
+        for symbol in symbol_tbl.iter() {
+            if symbol.is_undefined() {
+                continue;
+            }
+
+            let name = match string_tbl.get(symbol.st_name as _) {
+                Ok(name) if !name.is_empty() => name,
+                _ => continue,
+            };
+
+            symbols.push(KernelSymbol {
+                addr: VirtualAddress::new(symbol.st_value as *mut c_void),
+                size: symbol.st_size as _,
+                name: PhysicalAddress::new(name.as_ptr() as *mut u8),
+                name_len: name.len(),
+            });
+        }
+        symbols.sort_unstable_by_key(|symbol| symbol.addr);
+
+        // Never freed: the memory is loader data, which the kernel does not
+        // get to reuse, so the table stays valid for as long as it runs.
+        let symbols = symbols.leak();
+        bootinfo.kernel_symbols = PhysicalAddress::new(symbols.as_mut_ptr());
+        bootinfo.kernel_symbols_len = symbols.len();
 
         bootinfo
     }

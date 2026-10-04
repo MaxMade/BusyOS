@@ -1,5 +1,5 @@
 use crate::{
-    driver::{acpi::acpi::Acpi, framebuffer::Framebuffer},
+    driver::{acpi::acpi::Acpi, framebuffer::Framebuffer, ksymbols::KSymbols},
     kernel::{
         arc::Arc,
         linked_list::LinkedList,
@@ -159,4 +159,7 @@ pub enum ModuleDriver {
     #[cfg(target_arch = "x86_64")]
     /// The x2APIC driver, see [`X2Apic`].
     X2Apic(Arc<X2Apic>),
+
+    /// Kernel symbols, see [`KSymbols`].
+    KSymbols(Arc<KSymbols>),
 }

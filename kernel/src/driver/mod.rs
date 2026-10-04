@@ -12,6 +12,7 @@ pub mod acpi;
 pub mod console;
 pub mod framebuffer;
 pub mod irq;
+pub mod ksymbols;
 pub mod module;
 pub mod timer;
 pub mod x86_64;

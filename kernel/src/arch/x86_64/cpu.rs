@@ -114,7 +114,7 @@ impl Display for State {
         writeln!(f, "cr2: {} cr3: {}", self.cr2, self.cr3)?;
         writeln!(f, "cs: {}", self.cs)?;
         writeln!(f, "ss: {}", self.ss)?;
-        write!(f, "fs: 0x{:016x}", self.fs);
+        write!(f, "fs: 0x{:016x}", self.fs)?;
         write!(f, "gs: 0x{:016x}", self.gs)
     }
 }

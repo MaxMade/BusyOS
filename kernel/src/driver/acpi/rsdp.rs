@@ -8,10 +8,7 @@
 //! Only revision 2 (ACPI 2.0 and later) is supported, so the 64-bit
 //! [`XSDT`] pointer is always available and the legacy 32-bit RSDT is ignored.
 
-use crate::{
-    arch::generic::paging::PhysicalAddress,
-    driver::acpi::{acpi::SDTHeader, xsdt::XSDT},
-};
+use crate::{arch::generic::paging::PhysicalAddress, driver::acpi::xsdt::XSDT};
 
 /// The *Root System Description Pointer*.
 ///

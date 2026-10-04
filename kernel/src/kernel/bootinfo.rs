@@ -10,6 +10,30 @@ use crate::driver::framebuffer::{
 };
 use crate::utils::range_tree::Range;
 
+/// One entry of the kernel's symbol table, as the bootloader hands it over.
+///
+/// The bootloader builds the table from the kernel ELF's `.symtab`, keeps
+/// only the symbols the kernel defines and that have a name, and sorts them
+/// by [`addr`](Self::addr). The kernel only ever reads it, see
+/// [`KSymbols`](crate::driver::ksymbols::KSymbols).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct KernelSymbol {
+    /// Link-time virtual address the symbol starts at.
+    pub addr: VirtualAddress<c_void>,
+
+    /// Number of bytes the symbol spans, zero where the ELF file does not
+    /// say, as for assembly labels and linker script symbols.
+    pub size: usize,
+
+    /// Physical address of the name, which lies in the kernel ELF file. Not
+    /// NUL-terminated, see [`name_len`](Self::name_len).
+    pub name: PhysicalAddress<u8>,
+
+    /// Length of the name in bytes.
+    pub name_len: usize,
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct Bootinfo {
@@ -27,6 +51,12 @@ pub struct Bootinfo {
 
     /// Size of the kernel ELF file in physical memory.
     pub kernel_elf_size: usize,
+
+    /// Physical address of the kernel's symbol table, see [`KernelSymbol`].
+    pub kernel_symbols: PhysicalAddress<KernelSymbol>,
+
+    /// Number of entries in the kernel's symbol table.
+    pub kernel_symbols_len: usize,
 
     /// Physical address of the kernel `.text` segment.
     pub kernel_text_start: PhysicalAddress<c_void>,
@@ -80,6 +110,8 @@ impl Default for Bootinfo {
             kernel_start_symbol: VirtualAddress::null(),
             kernel_elf_start: PhysicalAddress::null(),
             kernel_elf_size: 0,
+            kernel_symbols: PhysicalAddress::null(),
+            kernel_symbols_len: 0,
             arch_bootinfo: Default::default(),
             kernel_text_start: PhysicalAddress::null(),
             kernel_text_size: 0,
