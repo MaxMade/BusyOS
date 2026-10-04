@@ -1,6 +1,8 @@
+use crate::arch::generic::paging::VirtualAddress;
 use crate::core_local;
 use crate::kernel::bitset::{self, BitSet};
 use crate::kernel::locking::PreviousToken;
+use core::ffi::c_void;
 use core::fmt::{Debug, Display};
 use core::fmt::{LowerHex, UpperHex};
 use core::hash::Hash;
@@ -93,6 +95,23 @@ pub trait CPU {
     unsafe fn raw_enable_interrupts();
 
     unsafe fn raw_disable_interrupts();
+
+    /// Records the return addresses of the calling code's stack frames,
+    /// innermost first, into `call_stack`, and returns the part it filled.
+    ///
+    /// The first entry lies in the caller of `unwind`, the next one in that
+    /// function's caller, and so on outwards. Pass each one to
+    /// [`KSymbols::emergency_lookup`](crate::driver::ksymbols::KSymbols::emergency_lookup)
+    /// to turn it into `name+offset`.
+    ///
+    /// The walk stops early, rather than reading arbitrary memory, at the
+    /// outermost frame of a stack, at the frame an interrupt entry started
+    /// and wherever the chain looks broken. A full `call_stack` stops it
+    /// too, so its length caps the depth.
+    ///
+    /// Safe to call on the panic path: it takes no lock, allocates nothing
+    /// and only reads the current stack.
+    fn unwind(call_stack: &mut [VirtualAddress<c_void>]) -> &mut [VirtualAddress<c_void>];
 }
 
 core_local! {

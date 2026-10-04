@@ -223,6 +223,7 @@ impl AccessRights {
 /// Virtual addresses are valid only in the context of a specific page table;
 /// dereferencing one without an active mapping is undefined behaviour.
 #[derive(Address)]
+#[repr(transparent)]
 pub struct VirtualAddress<T>(*mut T);
 
 unsafe impl<T> Sync for VirtualAddress<T> {}
@@ -238,6 +239,7 @@ unsafe impl<T> Sync for VirtualAddress<T> {}
 /// They must be mapped into a virtual address space before the CPU can access
 /// the memory they describe.
 #[derive(Address)]
+#[repr(transparent)]
 pub struct PhysicalAddress<T>(*mut T);
 
 unsafe impl<T> Sync for PhysicalAddress<T> {}

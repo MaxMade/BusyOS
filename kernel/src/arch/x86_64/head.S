@@ -57,7 +57,11 @@ _start:
         mov %rbp, %rsi
         mov %rax, %rsp
 
-        # Create function prologue on kernel stack
+        # Create function prologue on kernel stack, as the outermost frame of
+        # this core's frame-pointer chain: its saved %rbp is the marker, so
+        # that a backtrace stops here rather than walking into UEFI's frames.
+        # UEFI's %rbp is kept in %rsi and saved below.
+        mov CALL_STACK_END_MARKER(%rip), %rbp
         push %rbp
         mov %rsp, %rbp
         sub $24, %rsp

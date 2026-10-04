@@ -1,7 +1,17 @@
-use core::{cell::UnsafeCell, mem::MaybeUninit, panic::PanicInfo};
+use core::{
+    cell::UnsafeCell,
+    ffi::c_void,
+    fmt::{self, Display, Formatter},
+    mem::MaybeUninit,
+    panic::PanicInfo,
+};
 
 use crate::{
-    arch::{CPU, generic::cpu::CPU as GenericCPU},
+    arch::{
+        CPU,
+        generic::{cpu::CPU as GenericCPU, paging::VirtualAddress},
+    },
+    driver::ksymbols::KSymbols,
     kernel::printk::LogLevel,
     printkln,
 };
@@ -19,6 +29,44 @@ unsafe impl Sync for StateCell {}
 
 static CPU_STATE: StateCell = StateCell(UnsafeCell::new(MaybeUninit::zeroed()));
 
+/// How many frames of the call stack a panic shows at most.
+const BACKTRACE_DEPTH: usize = 16;
+
+/// The return addresses [`panic`] records, shown one frame per line, each
+/// with the demangled name of the symbol it lies in.
+///
+/// The first frame is the panic handler itself, followed by the panic
+/// machinery of `core` and then the code that panicked.
+struct Backtrace<'a>(&'a [VirtualAddress<c_void>]);
+
+impl Display for Backtrace<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return f.write_str("  <none>");
+        }
+
+        for (depth, &addr) in self.0.iter().enumerate() {
+            if depth > 0 {
+                f.write_str("\n")?;
+            }
+
+            write!(f, "  #{depth:<2} 0x{:016x}", addr.addr())?;
+
+            match KSymbols::emergency_lookup(addr) {
+                // `{:#}` leaves out the hash suffix of a legacy-mangled name,
+                // which only tells crate versions apart. A name that is not a
+                // Rust symbol, such as one from assembly, is shown as it is.
+                Some((name, offset)) => {
+                    write!(f, " {:#}+0x{offset:x}", rustc_demangle::demangle(name))?
+                }
+                None => f.write_str(" <unknown>")?,
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[panic_handler]
 fn panic(panic_info: &PanicInfo) -> ! {
     // SAFETY: nothing else refers to `CPU_STATE`, see `StateCell`, and every
@@ -29,12 +77,16 @@ fn panic(panic_info: &PanicInfo) -> ! {
     // First, before anything else overwrites the registers.
     CPU::state(cpu_state);
 
+    let mut call_stack = [VirtualAddress::null(); BACKTRACE_DEPTH];
+    let call_stack = CPU::unwind(&mut call_stack);
+
     // Halts after showing the message, see `__printk_emergency`.
     printkln!(
         LogLevel::Panic,
-        "KERNEL PANIC: {}\n\nCPU State:\n{}",
+        "KERNEL PANIC: {}\n\nCPU State:\n{}\n\nBacktrace:\n{}",
         panic_info,
-        cpu_state
+        cpu_state,
+        Backtrace(call_stack)
     );
 
     // SAFETY: not reached, the message above halts already. Halting again

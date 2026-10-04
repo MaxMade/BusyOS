@@ -23,7 +23,10 @@ interrupt_entry_\vector:
 	je 1f
 	swapgs
 1:
-        # Save callee-saved registers
+        # Save the interrupted code's base pointer, part of the frame
+        pushq %rbp
+
+        # Save caller-saved registers
 	pushq %r11
 	pushq %r10
 	pushq %r9
@@ -36,12 +39,19 @@ interrupt_entry_\vector:
 
 	cld
 
+        # End the frame-pointer chain here: a backtrace taken inside the
+        # handler stops at this entry rather than walking into the frames of
+        # the code that was interrupted, whose own position is the saved
+        # %rip. The saved %rbp lets an exception handler walk those frames
+        # separately.
+        mov CALL_STACK_END_MARKER(%rip), %rbp
+
 	# Call the high-level interrupt handler routine
 	movq $\vector, %rdi
 	movq %rsp, %rsi
 	call __interrupt_handler
 
-	# Restore callee-saved registers
+	# Restore caller-saved registers
 	popq %rax
 	popq %rcx
 	popq %rdx
@@ -51,6 +61,9 @@ interrupt_entry_\vector:
 	popq %r9
 	popq %r10
 	popq %r11
+
+        # Restore base pointer
+        popq %rbp
 
 	# Drop error code
 	addq $8, %rsp

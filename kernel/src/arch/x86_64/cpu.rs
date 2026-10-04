@@ -2,13 +2,40 @@
 //! interface.
 
 use crate::arch::generic::cpu::{InterruptFlag, Register};
+use crate::arch::generic::paging::VirtualAddress;
 use crate::arch::x86_64::gdt::SegmentSelector;
 use crate::arch::x86_64::paging::{CR2, CR3};
 use crate::arch::x86_64::rflags::RFLAGS;
 use core::arch::asm;
+use core::ffi::c_void;
 use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use core::num::TryFromIntError;
 use core::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
+
+/// The value `%rbp` holds in the outermost frame of every frame-pointer
+/// chain, so that [`unwind`](crate::arch::generic::cpu::CPU::unwind) knows
+/// where to stop.
+///
+/// `head.S` puts it into the first frame on each core's boot stack, and
+/// `entry.S` into `%rbp` before calling
+/// `__interrupt_handler`, so that a walk from inside an interrupt ends at
+/// the interrupt entry instead of continuing into the code it interrupted.
+///
+/// A non-canonical address on purpose: anything that dereferences it by
+/// mistake faults with `#GP` rather than reading memory. It also lies below
+/// every kernel address, which is what `__unwind` checks.
+#[unsafe(no_mangle)]
+pub static CALL_STACK_END_MARKER: u64 = 0xdeadcafedeadc0de;
+
+// Assembled by `build.rs` into the kernel binary only, so the bootloader,
+// which links this crate as a library, and the host tests do without it.
+#[cfg(all(not(test), not(feature = "library")))]
+unsafe extern "C" {
+    /// Walks the frame-pointer chain from the caller's frame outwards,
+    /// storing one return address per frame into the `len` entries at
+    /// `call_stack`, and returns how many it stored. See `unwind.S`.
+    fn __unwind(call_stack: *mut usize, len: usize) -> usize;
+}
 
 #[derive(Debug)]
 pub struct CPU;
@@ -279,6 +306,29 @@ impl crate::arch::generic::cpu::CPU for CPU {
             );
         }
     }
+
+    /// Walks the chain through `__unwind`, see `unwind.S`.
+    ///
+    /// Never inlined: `__unwind` starts at the frame of whoever called it,
+    /// which is this function's own, so the first entry is the return
+    /// address into this function's caller. Inlined, this frame would be
+    /// gone and the first entry would silently skip a level.
+    ///
+    /// In the bootloader and the host tests, which have no `__unwind`, this
+    /// records nothing.
+    #[inline(never)]
+    fn unwind(call_stack: &mut [VirtualAddress<c_void>]) -> &mut [VirtualAddress<c_void>] {
+        #[cfg(all(not(test), not(feature = "library")))]
+        // SAFETY: `VirtualAddress` is `#[repr(transparent)]` over a pointer,
+        // so the entries can be written as `usize`, and `__unwind` writes at
+        // most `call_stack.len()` of them and only reads the current stack.
+        let len = unsafe { __unwind(call_stack.as_mut_ptr().cast(), call_stack.len()) };
+
+        #[cfg(any(test, feature = "library"))]
+        let len = 0;
+
+        &mut call_stack[..len]
+    }
 }
 
 impl CPU {
@@ -516,6 +566,9 @@ pub struct InterruptStackFrame {
 
     /// `%r11` registers.
     r11: u64,
+
+    /// `%rbp` registers.
+    rbp: u64,
 
     // Interrupt-related error (`0` for compatibility).
     error_code: u64,
