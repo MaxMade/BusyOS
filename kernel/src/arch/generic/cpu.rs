@@ -149,6 +149,21 @@ where
     /// Whether this vector is the alignment-check exception.
     fn is_invalid_alignmnet(&self) -> bool;
 
+    /// Whether this vector is one the architecture reserves for its own
+    /// exceptions, such as a page fault or a general-protection fault.
+    ///
+    /// Exactly one of this and [`is_interrupt`](Self::is_interrupt) holds
+    /// for every vector.
+    fn is_exception(&self) -> bool;
+
+    /// Whether this vector is left to software, for device interrupts and
+    /// interrupts one core sends another.
+    ///
+    /// These are the vectors [`allocate`](Self::allocate) hands out. Exactly
+    /// one of this and [`is_exception`](Self::is_exception) holds for every
+    /// vector.
+    fn is_interrupt(&self) -> bool;
+
     /// Hands out a vector no caller has been given before, or [`None`] once
     /// they are used up.
     ///

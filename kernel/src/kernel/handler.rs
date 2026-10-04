@@ -208,22 +208,24 @@ pub fn handler(vector: InterruptVector, _stack_frame: *mut InterruptStackFrame) 
         }
     };
 
-    let token = match InterruptControllers::get(token) {
-        (Some(interrupt_controller), token) => {
-            match interrupt_controller.acknowledge(vector, token) {
-                Ok(token) => token,
-                Err((errno, _)) => {
-                    panic!(
-                        "Failed {}::acknowledge() (Interrupt vector: {}): {}",
-                        interrupt_controller.name(),
-                        vector.into_raw(),
-                        errno
-                    );
+    if vector.is_interrupt() {
+        token = match InterruptControllers::get(token) {
+            (Some(interrupt_controller), token) => {
+                match interrupt_controller.acknowledge(vector, token) {
+                    Ok(token) => token,
+                    Err((errno, _)) => {
+                        panic!(
+                            "Failed {}::acknowledge() (Interrupt vector: {}): {}",
+                            interrupt_controller.name(),
+                            vector.into_raw(),
+                            errno
+                        );
+                    }
                 }
             }
-        }
-        (None, token) => token,
-    };
+            (None, token) => token,
+        };
+    }
 
     let mut epilogue = Epilogue::enter_from_vector(token, vector);
     if epilogue_required {

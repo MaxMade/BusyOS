@@ -468,6 +468,17 @@ impl crate::arch::generic::cpu::InterruptVector for InterruptVector {
             }
         }
     }
+
+    /// Vectors 0 to 31, which the architecture reserves for exceptions,
+    /// whether or not one is currently defined for a given number.
+    fn is_exception(&self) -> bool {
+        self.0 <= 31
+    }
+
+    /// Vectors 32 to 255, the ones left to software.
+    fn is_interrupt(&self) -> bool {
+        self.0 >= 32
+    }
 }
 
 /// The state `entry.S` saves before calling [`__interrupt_handler`], in the
