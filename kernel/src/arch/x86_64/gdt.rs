@@ -894,6 +894,18 @@ pub struct SegmentSelector {
     pub index: u16,
 }
 
+impl Display for SegmentSelector {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "0b{:013b} 0b{:b} 0b{:02b}",
+            self.index(),
+            self.table_indicator() as u8,
+            self.rpl()
+        )
+    }
+}
+
 impl SegmentSelector {
     /// A selector for the GDT descriptor at `index`, requested at `rpl`.
     pub const fn create(index: u16, rpl: Ring) -> Self {

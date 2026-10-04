@@ -380,12 +380,7 @@ pub struct CR3 {
 
 impl Display for CR3 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "0x{:016x} (address: 0x{:016x})",
-            self.0,
-            self.addr() << REGULAR_PAGE_SHIFT as u64,
-        )
+        write!(f, "0x{:016x}", self.0,)
     }
 }
 

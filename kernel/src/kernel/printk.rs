@@ -109,7 +109,7 @@ use core::{
 
 use crate::{
     arch::{CPU, generic::cpu::CPU as _},
-    driver::console::{ConsoleOutput, Consoles},
+    driver::console::{ConsoleOutput, ConsoleOutputDriver, Consoles},
     kernel::locking::{CanAcquire, DriverLevelID, LockId, MemoryManagementLevelID, PreviousToken},
     mem::heap::Heap,
     utils::allocator::Allocator,
@@ -1073,7 +1073,7 @@ unsafe fn message<'a>(block: NonNull<u8>, size: usize) -> Option<&'a str> {
 /// runs again. At worst the one message it had already taken out is lost.
 /// Buffers are not freed, since nothing runs afterwards, and the allocator
 /// may be what panicked.
-pub fn __printk_emergency<S: AsRef<str>>(message: S) -> ! {
+pub fn __printk_emergency(message: Arguments<'_>) -> ! {
     // SAFETY: this core halts at the end, so the interrupt state never has to
     // be restored.
     unsafe { CPU::raw_disable_interrupts() };
@@ -1111,11 +1111,29 @@ pub fn __printk_emergency<S: AsRef<str>>(message: S) -> ! {
             }
         }
 
-        unsafe { console.emergency_write(&message) };
+        // Formatted straight onto the console rather than into a `Buffer`,
+        // so that a long message, such as one with a register dump, is not
+        // cut short.
+        let _ = EmergencyWriter(&console).write_fmt(message);
     }
 
     // SAFETY: there is nothing left to run.
     unsafe { CPU::halt() }
+}
+
+/// Formats onto a console through
+/// [`emergency_write`](ConsoleOutput::emergency_write), see
+/// [`__printk_emergency`].
+struct EmergencyWriter<'a>(&'a ConsoleOutputDriver);
+
+impl Write for EmergencyWriter<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        // SAFETY: only used by `__printk_emergency`, with interrupts masked
+        // on the only core there is.
+        unsafe { self.0.emergency_write(&s) };
+
+        Ok(())
+    }
 }
 
 /// Bytes of stack a [`printk!`] formats into.
@@ -1190,13 +1208,13 @@ impl Write for Buffer {
 /// caller runs, once for every `printk!` in it.
 #[inline(never)]
 pub fn __printk_fmt_lock_free(level: LogLevel, args: Arguments<'_>) {
+    if level == LogLevel::Panic {
+        __printk_emergency(args);
+    }
+
     let mut buffer = Buffer::new();
 
     buffer.format(args);
-
-    if level == LogLevel::Panic {
-        __printk_emergency(buffer.as_str());
-    }
 
     __printk_lock_free(buffer.as_str());
 }
@@ -1216,13 +1234,13 @@ pub fn __printk_fmt<Token>(level: LogLevel, args: Arguments<'_>, token: Token) -
 where
     Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
 {
+    if level == LogLevel::Panic {
+        __printk_emergency(args);
+    }
+
     let mut buffer = Buffer::new();
 
     buffer.format(args);
-
-    if level == LogLevel::Panic {
-        __printk_emergency(buffer.as_str());
-    }
 
     __printk(buffer.as_str(), token)
 }

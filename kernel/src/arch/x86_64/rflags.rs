@@ -159,26 +159,61 @@ pub struct RFLAGS {
 
 impl Display for RFLAGS {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const FLAGS: [(&str, fn(&RFLAGS) -> bool); 11] = [
-            ("CF", RFLAGS::cf),
-            ("PF", RFLAGS::pf),
-            ("AF", RFLAGS::af),
-            ("ZF", RFLAGS::zf),
-            ("SF", RFLAGS::sf),
-            ("TF", RFLAGS::tf),
-            ("IF", RFLAGS::interrupt),
-            ("DF", RFLAGS::df),
-            ("OF", RFLAGS::of),
-            ("NT", RFLAGS::nt),
-            ("AC", RFLAGS::ac),
-        ];
-
         write!(f, "0x{:016x} (iopl: {}", self.0, self.iopl())?;
+        if self.cf() {
+            write!(f, " CF")?;
+        }
 
-        for (name, get) in FLAGS {
-            if get(self) {
-                write!(f, " {name}")?;
-            }
+        if self.pf() {
+            write!(f, " PF")?;
+        }
+
+        if self.af() {
+            write!(f, " AF")?;
+        }
+
+        if self.zf() {
+            write!(f, " ZF")?;
+        }
+
+        if self.sf() {
+            write!(f, " SF")?;
+        }
+
+        if self.tf() {
+            write!(f, " TF")?;
+        }
+
+        if self.interrupt() {
+            write!(f, " IF")?;
+        }
+
+        if self.df() {
+            write!(f, " DF")?;
+        }
+
+        if self.of() {
+            write!(f, " OF")?;
+        }
+
+        if self.nt() {
+            write!(f, " NT")?;
+        }
+
+        if self.rf() {
+            write!(f, " RF")?;
+        }
+
+        if self.ac() {
+            write!(f, " AC")?;
+        }
+
+        if self.vif() {
+            write!(f, " VIF")?;
+        }
+
+        if self.vip() {
+            write!(f, " VIP")?;
         }
 
         write!(f, ")")

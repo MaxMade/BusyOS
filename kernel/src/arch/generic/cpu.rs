@@ -50,6 +50,8 @@ pub trait CPU {
 
     const CPUID_BITS: usize;
 
+    type State: Debug + Display;
+
     /// Stops the calling core for good, with interrupts masked.
     ///
     /// For the end of the panic path and anywhere else nothing sensible is
@@ -61,6 +63,8 @@ pub trait CPU {
     /// it took on is never finished, so other cores waiting on either wait
     /// forever.
     unsafe fn halt() -> !;
+
+    fn state(state: &mut Self::State);
 
     fn disable_interrupts<Token>(token: Token) -> InterruptState<Token>
     where

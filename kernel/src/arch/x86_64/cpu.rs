@@ -3,7 +3,9 @@
 
 use crate::arch::generic::cpu::{InterruptFlag, Register};
 use crate::arch::x86_64::gdt::SegmentSelector;
+use crate::arch::x86_64::paging::{CR2, CR3};
 use crate::arch::x86_64::rflags::RFLAGS;
+use core::arch::asm;
 use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use core::num::TryFromIntError;
 use core::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
@@ -13,6 +15,109 @@ pub struct CPU;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct CPUID(u8);
+
+#[derive(Debug)]
+#[repr(C)]
+pub struct State {
+    rax: Register<u64>,
+    rbx: Register<u64>,
+    rcx: Register<u64>,
+    rdx: Register<u64>,
+    rdi: Register<u64>,
+    rsi: Register<u64>,
+    rsp: Register<u64>,
+    rbp: Register<u64>,
+    r8: Register<u64>,
+    r9: Register<u64>,
+    r10: Register<u64>,
+    r11: Register<u64>,
+    r12: Register<u64>,
+    r13: Register<u64>,
+    r14: Register<u64>,
+    r15: Register<u64>,
+    rflags: RFLAGS,
+    cr2: CR2,
+    cr3: CR3,
+    cs: SegmentSelector,
+    ss: SegmentSelector,
+    fs: u64,
+    gs: u64,
+}
+
+unsafe impl Send for State {}
+
+unsafe impl Sync for State {}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(State, rax) == 0x00);
+    assert!(offset_of!(State, rbx) == 0x08);
+    assert!(offset_of!(State, rcx) == 0x10);
+    assert!(offset_of!(State, rdx) == 0x18);
+    assert!(offset_of!(State, rdi) == 0x20);
+    assert!(offset_of!(State, rsi) == 0x28);
+    assert!(offset_of!(State, rsp) == 0x30);
+    assert!(offset_of!(State, rbp) == 0x38);
+    assert!(offset_of!(State, r8) == 0x40);
+    assert!(offset_of!(State, r9) == 0x48);
+    assert!(offset_of!(State, r10) == 0x50);
+    assert!(offset_of!(State, r11) == 0x58);
+    assert!(offset_of!(State, r12) == 0x60);
+    assert!(offset_of!(State, r13) == 0x68);
+    assert!(offset_of!(State, r14) == 0x70);
+    assert!(offset_of!(State, r15) == 0x78);
+    assert!(offset_of!(State, rflags) == 0x80);
+    assert!(offset_of!(State, cr2) == 0x88);
+    assert!(offset_of!(State, cr3) == 0x90);
+    assert!(offset_of!(State, cs) == 0x98);
+    assert!(offset_of!(State, ss) == 0x9A);
+    assert!(offset_of!(State, fs) == 0xA0);
+    assert!(offset_of!(State, gs) == 0xA8);
+};
+
+impl Display for State {
+    // The general-purpose registers go through one format site in a loop,
+    // and the rest through a handful of small ones. A single `write!` with
+    // every register builds an argument array that alone takes more than a
+    // kilobyte of stack, which the panic path cannot spare.
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        const GENERAL: [(&str, fn(&State) -> Register<u64>); 16] = [
+            ("rax", |s| s.rax),
+            ("rbx", |s| s.rbx),
+            ("rcx", |s| s.rcx),
+            ("rdx", |s| s.rdx),
+            ("rdi", |s| s.rdi),
+            ("rsi", |s| s.rsi),
+            ("rbp", |s| s.rbp),
+            ("rsp", |s| s.rsp),
+            ("r8 ", |s| s.r8),
+            ("r9 ", |s| s.r9),
+            ("r10", |s| s.r10),
+            ("r11", |s| s.r11),
+            ("r12", |s| s.r12),
+            ("r13", |s| s.r13),
+            ("r14", |s| s.r14),
+            ("r15", |s| s.r15),
+        ];
+
+        for pair in GENERAL.chunks(2) {
+            let ((left, left_value), (right, right_value)) = (pair[0], pair[1]);
+            writeln!(
+                f,
+                "{left}: 0x{:x} {right}: 0x{:x}",
+                left_value(self),
+                right_value(self)
+            )?;
+        }
+
+        writeln!(f, "rflags: {}", self.rflags)?;
+        writeln!(f, "cr2: {} cr3: {}", self.cr2, self.cr3)?;
+        writeln!(f, "cs: {}", self.cs)?;
+        writeln!(f, "ss: {}", self.ss)?;
+        write!(f, "fs: 0x{:016x}", self.fs);
+        write!(f, "gs: 0x{:016x}", self.gs)
+    }
+}
 
 /// Id of the core the firmware starts the kernel on.
 ///
@@ -106,6 +211,74 @@ impl crate::arch::generic::cpu::CPU for CPU {
     type CPUID = CPUID;
 
     const CPUID_BITS: usize = 256;
+
+    type State = State;
+
+    #[inline(never)]
+    fn state(state: &mut Self::State) {
+        let ptr = state as *mut Self::State;
+        unsafe {
+            asm!(
+                "mov [{p} + 0x00], rax",
+                "mov [{p} + 0x08], rbx",
+                "mov [{p} + 0x10], rcx",
+                "mov [{p} + 0x18], rdx",
+                "mov [{p} + 0x20], rdi",
+                "mov [{p} + 0x28], rsi",
+                "mov [{p} + 0x30], rsp",
+                "mov [{p} + 0x38], rbp",
+                "mov [{p} + 0x40], r8",
+                "mov [{p} + 0x48], r9",
+                "mov [{p} + 0x50], r10",
+                "mov [{p} + 0x58], r11",
+                "mov [{p} + 0x60], r12",
+                "mov [{p} + 0x68], r13",
+                "mov [{p} + 0x70], r14",
+                "mov [{p} + 0x78], r15",
+
+                // RFLAGS nur über den Stack erreichbar.
+                "pushfq",
+                "pop rax",
+                "mov [{p} + 0x80], rax",
+
+                "mov rax, cr2",
+                "mov [{p} + 0x88], rax",
+                "mov rax, cr3",
+                "mov [{p} + 0x90], rax",
+
+                // 16-Bit-Selektoren, direkt als Wort geschrieben.
+                "mov ax, cs",
+                "mov [{p} + 0x98], ax",
+                "mov ax, ss",
+                "mov [{p} + 0x9A], ax",
+
+                // FS.BASE (MSR 0xC000_0100): rdmsr erwartet die
+                // MSR-Nummer in ecx und liefert low in eax, high in edx.
+                "mov ecx, 0xC0000100",
+                "rdmsr",
+                "shl rdx, 32",
+                "or  rax, rdx",
+                "mov [{p} + 0xA0], rax",
+
+                // GS.BASE (MSR 0xC000_0101).
+                //
+                // Nach einem swapgs liegt die aktive Basis in
+                // KERNEL_GS_BASE (0xC000_0102); hier wird immer
+                // GS.BASE gelesen, unabhängig vom swapgs-Zustand.
+                "mov ecx, 0xC0000101",
+                "rdmsr",
+                "shl rdx, 32",
+                "or  rax, rdx",
+                "mov [{p} + 0xA8], rax",
+                p = in(reg) ptr,
+                out("rax") _,
+                out("rcx") _,
+                out("rdx") _,
+                // Neither `nostack` nor `preserves_flags`: `pushfq` uses the
+                // stack, and `shl` and `or` change the status flags.
+            );
+        }
+    }
 }
 
 impl CPU {
