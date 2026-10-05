@@ -14,3 +14,5 @@ pub mod idt;
 pub mod init;
 pub mod io;
 pub mod pit;
+#[cfg(all(not(test), not(feature = "library")))]
+pub mod smp;

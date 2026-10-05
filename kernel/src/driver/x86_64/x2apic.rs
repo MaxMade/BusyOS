@@ -64,6 +64,7 @@ use crate::{
 ///
 /// The value is not an index: the firmware is free to leave gaps, so the
 /// identifiers of `n` cores are not necessarily `0..n`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LapicID(u32);
 
 impl LapicID {
@@ -387,6 +388,121 @@ impl MSR<0x839> for X2ApicCurrentCount {
     }
 }
 
+/// The *Interrupt Command Register* of the local APIC in x2APIC mode.
+///
+/// Writing it sends an inter-processor interrupt: to the core named by
+/// [`destination`](Self::destination), with the kind of message
+/// [`delivery_mode`](Self::delivery_mode) selects. In x2APIC mode the
+/// register is one 64-bit MSR, and the write is the send. Unlike in xAPIC
+/// mode there is no delivery-status bit to poll afterwards.
+#[bitfield(u64)]
+struct X2ApicICR {
+    /// Bits 7-0: Vector. For a start-up IPI, the page the core starts at.
+    #[bits(8)]
+    pub vector: u8,
+
+    /// Bits 10-8: Delivery mode.
+    #[bits(3)]
+    pub delivery_mode: X2ApicDeliveryMode,
+
+    /// Bit 11: Destination mode, `false` for a physical APIC ID.
+    #[bits(1)]
+    pub logical: bool,
+
+    /// Bits 13-12: Reserved. Bit 12 is the delivery status in xAPIC mode
+    /// only.
+    #[bits(2)]
+    __: u8,
+
+    /// Bit 14: Level. Set for every IPI except an INIT level de-assert,
+    /// which x2APIC mode does not support.
+    #[bits(1)]
+    pub assert: bool,
+
+    /// Bit 15: Trigger mode, `false` for edge.
+    #[bits(1)]
+    pub level_triggered: bool,
+
+    /// Bits 17-16: Reserved.
+    #[bits(2)]
+    __: u8,
+
+    /// Bits 19-18: Destination shorthand, `0` for none, so that
+    /// [`destination`](Self::destination) is used.
+    #[bits(2)]
+    pub shorthand: u8,
+
+    /// Bits 31-20: Reserved.
+    #[bits(12)]
+    __: u16,
+
+    /// Bits 63-32: x2APIC ID of the destination.
+    #[bits(32)]
+    pub destination: u32,
+}
+
+impl MSR<0x830> for X2ApicICR {
+    fn raw(&self) -> u64 {
+        self.0
+    }
+
+    unsafe fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// What kind of message an inter-processor interrupt is, as encoded in
+/// [`X2ApicICR::delivery_mode`].
+///
+/// The numeric value of each variant is the encoding the hardware expects.
+/// Only the modes this driver sends are named. The others read back as
+/// [`Fixed`](Self::Fixed), which is never a problem, since the register is
+/// only ever written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum X2ApicDeliveryMode {
+    /// An ordinary interrupt, on the vector given.
+    Fixed = 0b000,
+
+    /// Resets the destination core into its wait-for-SIPI state.
+    Init = 0b101,
+
+    /// Starts a core waiting for it at the page the vector names.
+    StartUp = 0b110,
+}
+
+impl X2ApicDeliveryMode {
+    /// The encoding of this mode.
+    const fn into_bits(self) -> u8 {
+        self as u8
+    }
+
+    /// The mode `bits` encodes, see the type's documentation for the ones
+    /// it does not name.
+    const fn from_bits(bits: u8) -> Self {
+        match bits & 0b111 {
+            0b101 => Self::Init,
+            0b110 => Self::StartUp,
+            _ => Self::Fixed,
+        }
+    }
+}
+
+/// The *Local APIC ID Register* in x2APIC mode: the 32-bit identifier of the
+/// calling core's local APIC. Read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct X2ApicID(u32);
+
+impl MSR<0x802> for X2ApicID {
+    fn raw(&self) -> u64 {
+        self.0 as _
+    }
+
+    unsafe fn from_raw(value: u64) -> Self {
+        Self(value as _)
+    }
+}
+
 /// The *EOI Register* of the local APIC in x2APIC mode.
 ///
 /// Writing it tells the local APIC that the interrupt currently in service
@@ -507,40 +623,10 @@ impl Module for X2Apic {
         // A core without x2APIC has no driver here. Not an error: the
         // driver simply does not register.
         //
-        // SAFETY: leaf 1 exists on every x86_64 processor.
-        let features = unsafe { FeatureInformation::read() };
-        if !features.ecx.x2apic() {
+        // SAFETY: this runs once, on the boot core, before anything uses the
+        // local APIC.
+        if !unsafe { Self::enable_local() } {
             return Ok(token);
-        }
-
-        // Switch the local APIC into x2APIC mode, through xAPIC if the
-        // firmware left it disabled, since going straight from disabled to
-        // x2APIC raises `#GP`. Until this is done every x2APIC register
-        // raises `#GP` as well.
-        //
-        // SAFETY: the processor reports x2APIC support above, and the steps
-        // follow the allowed transitions.
-        unsafe {
-            let mut apic_base = IA32ApicBase::read();
-            if !apic_base.enabled() {
-                apic_base.set_enabled(true);
-                apic_base.write();
-            }
-            if !apic_base.x2apic() {
-                apic_base.set_x2apic(true);
-                apic_base.write();
-            }
-        }
-
-        // Software-enable the local APIC, without which no local vector table
-        // entry can be unmasked.
-        //
-        // SAFETY: the local APIC is in x2APIC mode from here on.
-        unsafe {
-            let mut svr = X2ApicSVR::read();
-            svr.set_vector(SPURIOUS_VECTOR);
-            svr.set_enabled(true);
-            svr.write();
         }
 
         let state = State {};
@@ -809,6 +895,114 @@ const DIVIDERS: [(usize, X2ApicDivideMode); 8] = [
 ];
 
 impl X2Apic {
+    /// Switches the calling core's local APIC into x2APIC mode and
+    /// software-enables it, returning whether the core supports x2APIC.
+    ///
+    /// Every core has to do this for its own local APIC before any of its
+    /// x2APIC registers can be used: until then, each of them raises `#GP`.
+    /// [`init`](Module::init) does it for the boot core, and every other
+    /// core does it while it comes up. Doing it twice is harmless.
+    ///
+    /// # Safety
+    ///
+    /// Must not race with other code using the calling core's local APIC.
+    pub unsafe fn enable_local() -> bool {
+        // SAFETY: leaf 1 exists on every x86_64 processor.
+        let features = unsafe { FeatureInformation::read() };
+        if !features.ecx.x2apic() {
+            return false;
+        }
+
+        // Switch the local APIC into x2APIC mode, through xAPIC if the
+        // firmware left it disabled, since going straight from disabled to
+        // x2APIC raises `#GP`. Until this is done every x2APIC register
+        // raises `#GP` as well.
+        //
+        // SAFETY: the processor reports x2APIC support above, and the steps
+        // follow the allowed transitions.
+        unsafe {
+            let mut apic_base = IA32ApicBase::read();
+            if !apic_base.enabled() {
+                apic_base.set_enabled(true);
+                apic_base.write();
+            }
+            if !apic_base.x2apic() {
+                apic_base.set_x2apic(true);
+                apic_base.write();
+            }
+        }
+
+        // Software-enable the local APIC, without which no local vector table
+        // entry can be unmasked.
+        //
+        // SAFETY: the local APIC is in x2APIC mode from here on.
+        unsafe {
+            let mut svr = X2ApicSVR::read();
+            svr.set_vector(SPURIOUS_VECTOR);
+            svr.set_enabled(true);
+            svr.write();
+        }
+
+        true
+    }
+
+    /// The identifier of the calling core's local APIC.
+    ///
+    /// # Safety
+    ///
+    /// The calling core's local APIC must be in x2APIC mode, see
+    /// [`enable_local`](Self::enable_local).
+    pub unsafe fn local_id() -> LapicID {
+        // SAFETY: the register exists in x2APIC mode, see the contract.
+        LapicID(unsafe { X2ApicID::read() }.0)
+    }
+
+    /// Sends an INIT IPI to the core whose local APIC is `destination`.
+    ///
+    /// The first step of starting another core: it resets the core into the
+    /// state in which it waits for a start-up IPI, see
+    /// [`send_startup_ipi`](Self::send_startup_ipi), whatever the firmware
+    /// left it doing. The architecture asks for a wait of 10 ms before the
+    /// start-up IPI follows.
+    ///
+    /// # Safety
+    ///
+    /// Resets `destination` on the spot, losing whatever it was doing, so it
+    /// must be a core the kernel does not run on yet. Never the calling
+    /// core.
+    pub unsafe fn send_init_ipi(destination: &LapicID) {
+        let icr = X2ApicICR::new()
+            .with_delivery_mode(X2ApicDeliveryMode::Init)
+            .with_assert(true)
+            .with_destination(destination.0);
+
+        // SAFETY: the local APIC is in x2APIC mode, so the register exists,
+        // and the caller vouches for the destination.
+        unsafe { icr.write() };
+    }
+
+    /// Sends a start-up IPI to the core whose local APIC is `destination`,
+    /// making it start in real mode at physical address `page << 12`.
+    ///
+    /// Only a core that an INIT IPI has put into its wait-for-SIPI state
+    /// acts on it. The architecture sends it twice, 200 µs apart, in case
+    /// the first one is lost. A core that already runs ignores the second.
+    ///
+    /// # Safety
+    ///
+    /// The page must hold the code the core is to start with, below 1 MiB,
+    /// and stay untouched until the core has left it.
+    pub unsafe fn send_startup_ipi(destination: &LapicID, page: u8) {
+        let icr = X2ApicICR::new()
+            .with_vector(page)
+            .with_delivery_mode(X2ApicDeliveryMode::StartUp)
+            .with_assert(true)
+            .with_destination(destination.0);
+
+        // SAFETY: as for `send_init_ipi`, and the caller vouches for the page.
+        unsafe { icr.write() };
+    }
+
     /// The divisor and initial count that come closest to `interval`.
     ///
     /// The interval is first expressed in ticks of the undivided clock, which
@@ -1044,5 +1238,36 @@ impl InterruptController for X2Apic {
         unsafe { X2ApicEOI::new().write() };
 
         Ok(token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The encodings of Intel SDM vol. 3, 8.4.4: an INIT is delivery mode
+    /// `101` with the level asserted, `0x4500`, and the destination sits in
+    /// the upper half.
+    #[test]
+    fn init_ipi_encoding() {
+        let icr = X2ApicICR::new()
+            .with_delivery_mode(X2ApicDeliveryMode::Init)
+            .with_assert(true)
+            .with_destination(5);
+
+        assert_eq!(icr.raw(), 0x0000_0005_0000_4500);
+    }
+
+    /// A start-up IPI is delivery mode `110` with the start page as its
+    /// vector: `0x46` followed by the page.
+    #[test]
+    fn startup_ipi_encoding() {
+        let icr = X2ApicICR::new()
+            .with_vector(0x08)
+            .with_delivery_mode(X2ApicDeliveryMode::StartUp)
+            .with_assert(true)
+            .with_destination(0x1_0000);
+
+        assert_eq!(icr.raw(), 0x0001_0000_0000_4608);
     }
 }

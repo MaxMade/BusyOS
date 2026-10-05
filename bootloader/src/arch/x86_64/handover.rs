@@ -7,7 +7,7 @@ use busyos::{
     },
     driver::framebuffer::{Configuration as FramebufferConfiguration, Format as FramebufferFormat},
     kernel::{
-        bootinfo::Bootinfo,
+        bootinfo::{AP_TRAMPOLINE_PAGES, Bootinfo},
         locking::{CanAcquire, PreviousToken, level::Epilogue},
     },
 };
@@ -61,6 +61,20 @@ impl crate::arch::generic::handover::HandOver for HandOver {
         bootinfo.arch_bootinfo.rsdp = match rsdp {
             Some(rsdp) => rsdp,
             None => panic!("Unable to find RSDP"),
+        };
+
+        // Reserve the area the other cores start in. A core starts in real
+        // mode, so it has to lie below 1 MiB. Loader data is never handed to
+        // the kernel as free memory, so nothing else will use it.
+        bootinfo.ap_trampoline = match uefi::boot::allocate_pages(
+            uefi::boot::AllocateType::MaxAddress(0xF_FFFF),
+            uefi::boot::MemoryType::LOADER_DATA,
+            AP_TRAMPOLINE_PAGES,
+        ) {
+            Ok(area) => PhysicalAddress::new(area.as_ptr().cast()),
+            // Not fatal: the boot core runs regardless, only the others stay
+            // off.
+            Err(_) => PhysicalAddress::null(),
         };
 
         // Save the address of `_start` symbol

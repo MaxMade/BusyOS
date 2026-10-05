@@ -16,6 +16,7 @@ fn main() {
             assemble(&arch_dir, "head.S");
             assemble(&arch_dir, "entry.S");
             assemble(&arch_dir, "unwind.S");
+            assemble(&arch_dir, "ap_trampoline.S");
         }
     }
 }

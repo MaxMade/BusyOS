@@ -74,6 +74,11 @@ struct Header {
     record_len: u8,
 }
 
+/// Bit of a processor entry's `flags` that marks the core as enabled, that is
+/// present and usable. An online-capable core without it could only be added
+/// later, which the kernel does not support.
+const ENABLED: u32 = 1 << 0;
+
 /// A *Processor Local x2APIC* record ([`EntryType::Localx2APIC`]).
 ///
 /// The firmware provides one such record per logical processor that the
@@ -95,7 +100,6 @@ struct Localx2APICEntry {
 
     /// Bit 0 marks the core as enabled, bit 1 as online-capable. A core with
     /// neither bit set must not be started.
-    #[allow(unused)]
     flags: u32,
 
     /// The processor's UID, matching the one its object carries in the
@@ -129,7 +133,6 @@ struct LocalAPICEntry {
 
     /// Bit 0 marks the core as enabled, bit 1 as online-capable. A core with
     /// neither bit set must not be started.
-    #[allow(unused)]
     flags: u32,
 }
 
@@ -204,9 +207,12 @@ impl MADT {
                 let entry_ptr = header_ptr as *const LocalAPICEntry;
                 let entry = unsafe { entry_ptr.as_ref_unchecked() };
 
-                let lapic_id = unsafe { LapicID::from_raw(entry.lapic_id as _) };
+                // A disabled core is not present, and must not be started.
+                if entry.flags & ENABLED != 0 {
+                    let lapic_id = unsafe { LapicID::from_raw(entry.lapic_id as _) };
 
-                token = acpi.register_x2apic_lapic_id(lapic_id, token);
+                    token = acpi.register_x2apic_lapic_id(lapic_id, token);
+                }
             }
 
             if header.entry_type == EntryType::Localx2APIC as u8 {
@@ -218,9 +224,12 @@ impl MADT {
                 let entry_ptr = header_ptr as *const Localx2APICEntry;
                 let entry = unsafe { entry_ptr.as_ref_unchecked() };
 
-                let lapic_id = unsafe { LapicID::from_raw(entry.lapic_id) };
+                // A disabled core is not present, and must not be started.
+                if entry.flags & ENABLED != 0 {
+                    let lapic_id = unsafe { LapicID::from_raw(entry.lapic_id) };
 
-                token = acpi.register_x2apic_lapic_id(lapic_id, token);
+                    token = acpi.register_x2apic_lapic_id(lapic_id, token);
+                }
             }
 
             // Continue with next entry

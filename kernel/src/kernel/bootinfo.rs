@@ -10,6 +10,21 @@ use crate::driver::framebuffer::{
 };
 use crate::utils::range_tree::Range;
 
+/// Pages the bootloader reserves below 1 MiB for starting the other cores.
+///
+/// A core starts in real mode, at a page below 1 MiB that the start-up IPI
+/// names, so the code it starts with and everything it needs before it can
+/// reach the rest of memory has to live down there:
+///
+/// | Page | Holds |
+/// |------|-------|
+/// | 0    | the start-up code, copied there by the kernel, and its data |
+/// | 1    | a PML4 for the switch to long mode |
+/// | 2    | the PDPT below it |
+/// | 3    | the page directory below that |
+/// | 4    | a temporary stack |
+pub const AP_TRAMPOLINE_PAGES: usize = 5;
+
 /// One entry of the kernel's symbol table, as the bootloader hands it over.
 ///
 /// The bootloader builds the table from the kernel ELF's `.symtab`, keeps
@@ -57,6 +72,11 @@ pub struct Bootinfo {
 
     /// Number of entries in the kernel's symbol table.
     pub kernel_symbols_len: usize,
+
+    /// Physical address of the area the other cores start in, see
+    /// [`AP_TRAMPOLINE_PAGES`], or null if the bootloader could not reserve
+    /// one.
+    pub ap_trampoline: PhysicalAddress<c_void>,
 
     /// Physical address of the kernel `.text` segment.
     pub kernel_text_start: PhysicalAddress<c_void>,
@@ -112,6 +132,7 @@ impl Default for Bootinfo {
             kernel_elf_size: 0,
             kernel_symbols: PhysicalAddress::null(),
             kernel_symbols_len: 0,
+            ap_trampoline: PhysicalAddress::null(),
             arch_bootinfo: Default::default(),
             kernel_text_start: PhysicalAddress::null(),
             kernel_text_size: 0,

@@ -22,6 +22,7 @@ use crate::driver::acpi::rsdp::RSDP;
 use crate::driver::acpi::xsdt::XSDT;
 use crate::driver::module::{ModuleDriver, Modules};
 use crate::kernel::arc::Arc;
+use crate::kernel::ticketlock::{DriverRWTicketlock, RWTicketlock};
 use crate::{
     arch::Paging,
     driver::module::Module,
@@ -270,6 +271,11 @@ impl Module for Acpi {
                 panic!("Unable to create sharable ACPI driver instance: {}", error);
             }
         };
+        // Kept for `Acpi::get`, so that the other cores can be found later.
+        let (mut handle, t) = ACPI.acquire(token);
+        *handle = Some(driver.clone());
+        token = handle.release(t);
+
         token = match Modules::register(ModuleDriver::Acpi(driver), token) {
             Ok(token) => token,
             Err((error, _)) => {
@@ -286,7 +292,36 @@ impl Module for Acpi {
     }
 }
 
+/// The ACPI driver, once [`Acpi::init`](Module::init) has run, see
+/// [`Acpi::get`].
+static ACPI: DriverRWTicketlock<Option<Arc<Acpi>>> =
+    DriverRWTicketlock::new(RWTicketlock::new(), None);
+
 impl Acpi {
+    /// Returns a handle on the ACPI driver, or [`None`] if it has not been
+    /// initialised.
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned.
+    pub fn get<Token>(token: Token) -> (Option<Arc<Acpi>>, Token)
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        let (handle, token) = ACPI.acquire_shared(token);
+        let driver = handle.clone();
+
+        (driver, handle.release(token))
+    }
+
+    /// The local APIC identifier of every enabled core the firmware reported,
+    /// the boot core's included, each once, in the order the firmware listed
+    /// them.
+    #[cfg(target_arch = "x86_64")]
+    pub fn x2apic_lapic_ids(&self) -> impl Iterator<Item = LapicID> + '_ {
+        self.x2apic_lapic_ids.iter().copied()
+    }
+
     /// Records the local APIC identifier of one core.
     ///
     /// Called once per *Processor Local x2APIC* record while the [`MADT`] is
@@ -304,6 +339,12 @@ impl Acpi {
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
         let mut token = token;
+
+        // The firmware may describe a core twice, through a local APIC and a
+        // local x2APIC record. It is one core all the same.
+        if self.x2apic_lapic_ids.iter().any(|&known| known == lapic_id) {
+            return token;
+        }
 
         token = match self.x2apic_lapic_ids.try_push_back(lapic_id, token) {
             Ok(token) => token,

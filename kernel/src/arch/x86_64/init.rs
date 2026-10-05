@@ -11,10 +11,13 @@ use crate::core_local;
 use crate::driver::irq::IRQCapable;
 use crate::driver::module::Modules;
 use crate::driver::timer::{Timer as _, Timers};
+use crate::driver::x86_64::x2apic::X2Apic;
 use crate::kernel::bootinfo::BOOTINFO;
 use crate::kernel::core_local::{PerCPU, init_block_base};
 use crate::kernel::locking::InitLevel;
+use crate::kernel::locking::InitLevelID;
 use crate::kernel::locking::RootToken;
+use crate::kernel::locking::Shared;
 use crate::kernel::locking::Token;
 use crate::kernel::printk;
 use crate::kernel::printk::LogLevel;
@@ -155,13 +158,12 @@ pub extern "C" fn start() -> i32 {
     token = PageFrames::handover_from_early(token);
     token = unsafe { PageFrames::init_from_bootinfo(token) };
 
-    // Prepare GDT
+    // Prepare GDT and IDT, which every core shares
     token = unsafe { Gdt::init(token) };
-    token = unsafe { Gdt::load(token) };
-
-    // Prepare IDT
     token = unsafe { Idt::init(token) };
-    token = unsafe { Idt::load(token) };
+
+    // What every core does for itself, the boot core included
+    token = unsafe { init_core(token) };
 
     // Prepare printk!
     token = printk::init(LogLevel::Info, token);
@@ -205,7 +207,69 @@ pub extern "C" fn start() -> i32 {
         }
     }
 
+    // Start the other cores, now that everything they rely on is in place
+    token = crate::arch::x86_64::smp::start_other_cores(token);
+
     init_level.leave(token);
 
     todo!();
+}
+
+/// The token every core starts out with, at the `Init` level.
+type InitToken = Token<InitLevelID, RootToken, Shared>;
+
+/// What every core has to set up for itself, the boot core included.
+///
+/// Loads the GDT and IDT the boot core built, since `GDTR` and `IDTR` are
+/// per-core registers, and switches the core's own local APIC into x2APIC
+/// mode, since every core has one of its own.
+///
+/// # Safety
+///
+/// [`Gdt::init`] and [`Idt::init`] must have run, on the boot core, and this
+/// must run once per core, before the core uses its local APIC.
+unsafe fn init_core(token: InitToken) -> InitToken {
+    // SAFETY: the boot core built both tables, see the function's contract.
+    let token = unsafe { Gdt::load(token) };
+    let token = unsafe { Idt::load(token) };
+
+    // A core without x2APIC simply goes on without: the x2APIC driver does
+    // not register then, on the boot core, and nothing else uses it.
+    //
+    // SAFETY: nothing on this core uses its local APIC yet.
+    let _ = unsafe { X2Apic::enable_local() };
+
+    token
+}
+
+/// Rust entry of every core but the boot core.
+///
+/// Called by `__ap_start` (see `ap_trampoline.S`) once the core runs on its
+/// own boot stack, with the kernel's page tables, the boot core's `CR4` and
+/// `EFER`, and its own core-local block in `GS`, whose `CPUID` `__init_gs`
+/// has filled in with `cpu_id`.
+///
+/// Everything the boot core sets up for all of them, such as the heap, the
+/// page tables, the GDT and IDT and the drivers, is already in place: the
+/// boot core only starts the others once it is.
+#[unsafe(no_mangle)]
+pub extern "C" fn start_ap(cpu_id: usize) -> ! {
+    // SAFETY: this is the core's first Rust code after `__init_gs`, and it
+    // holds no token yet.
+    let root_token = unsafe { RootToken::forge() };
+    let (init_level, token) = InitLevel::enter(root_token);
+
+    // SAFETY: the boot core has built the GDT and IDT before starting this
+    // core, and this runs once, before the core uses its local APIC.
+    let token = unsafe { init_core(token) };
+
+    let token = printkln!(LogLevel::Info, token, "Core {} is up", cpu_id);
+
+    init_level.leave(token);
+
+    // TODO(@MaxMade): Give the core work, once there is a scheduler, and a
+    // timer of its own.
+
+    // SAFETY: the core holds nothing that another core could wait for.
+    unsafe { CPU::halt() }
 }
