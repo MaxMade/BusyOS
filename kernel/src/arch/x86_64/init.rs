@@ -8,7 +8,9 @@ use crate::arch::generic::paging::Paging as _;
 use crate::arch::x86_64::gdt::Gdt;
 use crate::arch::x86_64::idt::Idt;
 use crate::core_local;
+use crate::driver::irq::IRQCapable;
 use crate::driver::module::Modules;
+use crate::driver::timer::{Timer as _, Timers};
 use crate::kernel::bootinfo::BOOTINFO;
 use crate::kernel::core_local::{PerCPU, init_block_base};
 use crate::kernel::locking::InitLevel;
@@ -16,9 +18,12 @@ use crate::kernel::locking::RootToken;
 use crate::kernel::locking::Token;
 use crate::kernel::printk;
 use crate::kernel::printk::LogLevel;
+use crate::kernel::time::MilliSeconds;
+use crate::kernel::time::TimeUnit;
 use crate::mem::heap::Heap;
 use crate::mem::page_frames::EarlyPageFrames;
 use crate::mem::page_frames::PageFrames;
+use crate::printkln;
 
 use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -165,7 +170,43 @@ pub extern "C" fn start() -> i32 {
     // Initialise modules
     token = Modules::init(token);
 
+    // Setup timer
+    match Timers::get(token) {
+        (Some(timer), t) => {
+            let t = match timer.enable_irqs(t) {
+                Ok(t) => t,
+                Err((error, t)) => printkln!(
+                    LogLevel::Error,
+                    t,
+                    "Unable to unmask system timer: {}",
+                    error
+                ),
+            };
+
+            let interval = MilliSeconds::from(10).to_nanoseconds_lossy();
+            match timer.setup(interval, true, t) {
+                Ok(t) => token = t,
+                Err((error, t)) => {
+                    token = printkln!(
+                        LogLevel::Error,
+                        t,
+                        "Unable to setup system timer: {}",
+                        error
+                    );
+                }
+            }
+        }
+        (None, t) => {
+            token = printkln!(
+                LogLevel::Warn,
+                t,
+                "Unable to setup system timer: no timer found"
+            );
+        }
+    }
+
     init_level.leave(token);
 
-    todo!();
+    unsafe { CPU::raw_enable_interrupts() };
+    loop {}
 }

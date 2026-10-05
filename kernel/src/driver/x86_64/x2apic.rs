@@ -839,6 +839,16 @@ impl Timer for X2Apic {
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
+        // XXX: x2APIC is local; thus, no synchronisation
+        unsafe {
+            let mut lvtt_timer = X2ApicLVTTimer::read();
+            match peridoc {
+                true => lvtt_timer.set_timer_mode(X2ApicLVTTimerMode::Periodic),
+                false => lvtt_timer.set_timer_mode(X2ApicLVTTimerMode::OneShot),
+            }
+            lvtt_timer.write();
+        }
+
         let (mode, count) = match self.configuration(interval) {
             Some(configuration) => configuration,
             None => return Err((Errno::EINVAL, token)),
@@ -853,16 +863,6 @@ impl Timer for X2Apic {
         unsafe {
             let initial_cnt = X2ApicInitialCount::from_raw(count as u64);
             initial_cnt.write();
-        }
-
-        // XXX: x2APIC is local; thus, no synchronisation
-        unsafe {
-            let mut lvtt_timer = X2ApicLVTTimer::read();
-            match peridoc {
-                true => lvtt_timer.set_timer_mode(X2ApicLVTTimerMode::Periodic),
-                false => lvtt_timer.set_timer_mode(X2ApicLVTTimerMode::OneShot),
-            }
-            lvtt_timer.write();
         }
 
         Ok(token)

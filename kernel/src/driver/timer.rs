@@ -17,10 +17,13 @@ use crate::{driver::x86_64::x2apic::X2Apic, kernel::arc::Arc};
 
 use crate::{
     arch::CPUID,
-    driver::irq::IRQCapable,
+    driver::{irq::IRQCapable, module::Module},
     kernel::{
         linked_list::LinkedList,
-        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken, ReadGuard, Shared, Token},
+        locking::{
+            CanAcquire, DriverLevelID, EpilogueLevelID, LockId, PreviousToken, PrologueLevelID,
+            ReadGuard, Shared, Token,
+        },
         ticketlock::{DriverRWTicketlock, RWTicketlock, RWTicketlockDriverID},
         time::NanoSeconds,
     },
@@ -90,6 +93,115 @@ pub enum TimerDriver {
     #[cfg(target_arch = "x86_64")]
     /// The x2APIC driver, see [`X2Apic`].
     X2Apic(Arc<X2Apic>),
+}
+
+// The enum is a `Module` so that it can be `IRQCapable` and a `Timer`, which
+// require one. Only `name` means anything on a handle, since the driver it
+// names has long been initialised by the time a handle exists.
+impl Module for TimerDriver {
+    /// Never called.
+    ///
+    /// A handle names a driver that is already up, so there is nothing here
+    /// to initialise. Each concrete driver is brought up through its own
+    /// [`Module::init`], which is what creates the handle in the first
+    /// place.
+    ///
+    /// # Panics
+    ///
+    /// Always.
+    fn init<Token>(_: Token) -> Result<Token, (Errno, Token)>
+    where
+        Self: Sized,
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        panic!("TimerDriver::init(...) must never be invoked directly.")
+    }
+
+    /// The name of the driver this handle names, see [`Module::name`].
+    fn name(&self) -> &'static str {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            TimerDriver::X2Apic(x2apic) => x2apic.name(),
+        }
+    }
+}
+
+// Every method below matches on the variant and forwards to the concrete
+// driver's method, handing `token` along. A timer is `IRQCapable` first, so
+// the handle forwards that part too.
+impl IRQCapable for TimerDriver {
+    /// Forwards to the concrete timer, see [`IRQCapable::enable_irqs`].
+    fn enable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            TimerDriver::X2Apic(x2apic) => x2apic.enable_irqs(token),
+        }
+    }
+
+    /// Forwards to the concrete timer, see [`IRQCapable::disable_irqs`].
+    fn disable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            TimerDriver::X2Apic(x2apic) => x2apic.disable_irqs(token),
+        }
+    }
+
+    /// Forwards to the concrete timer, see [`IRQCapable::irqs_enabled`].
+    fn irqs_enabled<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            TimerDriver::X2Apic(x2apic) => x2apic.irqs_enabled(token),
+        }
+    }
+
+    /// Forwards to the concrete timer, see [`IRQCapable::prologue`].
+    fn prologue<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
+    where
+        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
+    {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            TimerDriver::X2Apic(x2apic) => x2apic.prologue(token),
+        }
+    }
+
+    /// Forwards to the concrete timer, see [`IRQCapable::epilogue`].
+    fn epilogue<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+    {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            TimerDriver::X2Apic(x2apic) => x2apic.epilogue(token),
+        }
+    }
+}
+
+impl Timer for TimerDriver {
+    /// Forwards to the concrete timer, see [`Timer::setup`].
+    fn setup<Token>(
+        &self,
+        interval: NanoSeconds,
+        peridoc: bool,
+        token: Token,
+    ) -> Result<Token, (Errno, Token)>
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            TimerDriver::X2Apic(x2apic) => x2apic.setup(interval, peridoc, token),
+        }
+    }
 }
 
 /// Every timer that has registered itself, in the order they did.
