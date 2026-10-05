@@ -20,13 +20,14 @@
 //! a [`Module`], an [`InterruptController`], an [`IRQCapable`] device that
 //! owns the timer vector, and a [`Timer`].
 
-use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 
 use bitfield_struct::bitfield;
 use driver_macro::module;
 
 use crate::arch::BOOT_CPUID;
-use crate::arch::generic::cpu::CPUID;
+use crate::arch::generic::cpu::{CPU as GenericCPU, CPUID, CPUSet};
+use crate::driver::ipi::{IPICapable, IPIDriver, IPIs, Mode};
 use crate::{
     arch::{
         InterruptVector,
@@ -50,7 +51,6 @@ use crate::{
         locking::{
             CanAcquire, DriverLevelID, EpilogueLevelID, LockId, PreviousToken, PrologueLevelID,
         },
-        ticketlock::{DriverTicketlock, Ticketlock},
         time::{MilliSeconds, NanoSeconds, TimeUnit},
     },
     user::errno::Errno,
@@ -467,6 +467,9 @@ enum X2ApicDeliveryMode {
     /// Resets the destination core into its wait-for-SIPI state.
     Init = 0b101,
 
+    /// A non-maskable interrupt, on the NMI vector whatever the vector says.
+    Nmi = 0b100,
+
     /// Starts a core waiting for it at the page the vector names.
     StartUp = 0b110,
 }
@@ -481,6 +484,7 @@ impl X2ApicDeliveryMode {
     /// it does not name.
     const fn from_bits(bits: u8) -> Self {
         match bits & 0b111 {
+            0b100 => Self::Nmi,
             0b101 => Self::Init,
             0b110 => Self::StartUp,
             _ => Self::Fixed,
@@ -538,14 +542,20 @@ module! {
     driver: crate::driver::x86_64::x2apic::X2Apic,
 }
 
-/// Mutable driver state, behind the driver-level lock of [`X2Apic`].
+/// Marks a core in [`LAPIC_IDS`] whose local APIC is not known.
 ///
-/// Empty so far. None of the timer's registers are kept here: they are read
-/// from and written to their MSRs where they are needed, so there is no copy
-/// that could drift from what the hardware holds. What was measured of the
-/// timer never changes after [`X2Apic::init`] and therefore lives outside the
-/// lock, in [`X2Apic::ticks_per_ms`].
-struct State {}
+/// `0xFFFF_FFFF` is the x2APIC broadcast address, which no local APIC has as
+/// its own identifier.
+const UNKNOWN_LAPIC: u32 = u32::MAX;
+
+/// The local APIC identifier of every core, indexed by the kernel's core
+/// number, see [`X2Apic::record_local_id`].
+///
+/// What turns a [`CPUSet`] into the addresses an inter-processor interrupt
+/// needs. Atomic, since every core fills in its own entry while it comes up,
+/// while the boot core may already be sending.
+static LAPIC_IDS: [AtomicU32; <crate::arch::CPU as GenericCPU>::CPUID_BITS] =
+    [const { AtomicU32::new(UNKNOWN_LAPIC) }; <crate::arch::CPU as GenericCPU>::CPUID_BITS];
 
 /// The local APIC of the core that brought the driver up.
 ///
@@ -555,7 +565,6 @@ struct State {}
 /// of the timer is measured once and read-only afterwards, so it needs no
 /// lock either.
 pub struct X2Apic {
-    state: DriverTicketlock<State>,
     /// Timer ticks in one millisecond, as measured against the [`PIT`], at
     /// [`X2ApicDivideMode::Divide1`].
     ///
@@ -628,8 +637,6 @@ impl Module for X2Apic {
         if !unsafe { Self::enable_local() } {
             return Ok(token);
         }
-
-        let state = State {};
 
         // Determine ticks per duration. The timer is masked throughout, so
         // the counts below expire without ever raising a vector: nothing is
@@ -724,7 +731,6 @@ impl Module for X2Apic {
         }
 
         let driver = Self {
-            state: DriverTicketlock::new(Ticketlock::new(), state),
             ticks_per_ms,
             total_ticks: AtomicUsize::new(0),
             period_ticks: AtomicUsize::new(0),
@@ -787,6 +793,17 @@ impl Module for X2Apic {
             Err((error, _)) => {
                 panic!(
                     "Unable to register x2APIC driver as timer device: {}",
+                    error
+                );
+            }
+        };
+
+        // Register as inter-processor interrupt sender
+        match IPIs::register(IPIDriver::X2Apic(driver.clone()), token) {
+            Ok(t) => token = t,
+            Err((error, _)) => {
+                panic!(
+                    "Unable to register x2APIC driver as inter-processor interrupt sender: {}",
                     error
                 );
             }
@@ -944,6 +961,25 @@ impl X2Apic {
         }
 
         true
+    }
+
+    /// Records the calling core's local APIC identifier under its core
+    /// number, so that [`IPICapable::send`] can address the core.
+    ///
+    /// Every core does this for itself while it comes up, right after
+    /// [`enable_local`](Self::enable_local).
+    ///
+    /// # Safety
+    ///
+    /// As for [`local_id`](Self::local_id), and the core's `CPUID` must be
+    /// set.
+    pub unsafe fn record_local_id() {
+        let cpu: usize = CPUID.with(|cpuid| *cpuid).into();
+
+        // SAFETY: see the function's contract.
+        let lapic = unsafe { Self::local_id() };
+
+        LAPIC_IDS[cpu].store(lapic.0, AtomicOrdering::Release);
     }
 
     /// The identifier of the calling core's local APIC.
@@ -1224,6 +1260,45 @@ impl Timer for X2Apic {
     }
 }
 
+impl IPICapable for X2Apic {
+    /// Sends one interrupt per core in `target`, see [`IPICapable::send`].
+    ///
+    /// Each core is addressed by the local APIC identifier it recorded while
+    /// coming up, see [`X2Apic::record_local_id`]. A core that has none
+    /// recorded did not come up, and is skipped.
+    ///
+    /// [`Mode::Panic`] is sent as a non-maskable interrupt: it has to reach a
+    /// core that runs with interrupts masked, and the core halts on it, see
+    /// `handler` in `kernel/handler.rs`.
+    fn send<Token>(&self, target: CPUSet, mode: Mode, token: Token) -> Result<Token, (Errno, Token)>
+    where
+        Self: Sized,
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        let icr = match mode {
+            Mode::Panic => X2ApicICR::new()
+                .with_delivery_mode(X2ApicDeliveryMode::Nmi)
+                .with_assert(true),
+        };
+
+        for cpu in &target {
+            let cpu: usize = cpu.into();
+            let lapic = LAPIC_IDS[cpu].load(AtomicOrdering::Acquire);
+            if lapic == UNKNOWN_LAPIC {
+                continue;
+            }
+
+            // XXX: x2APIC is local; thus, no synchronisation
+            //
+            // SAFETY: the local APIC is in x2APIC mode, so the register
+            // exists, and the destination is a core that came up.
+            unsafe { icr.with_destination(lapic).write() };
+        }
+
+        Ok(token)
+    }
+}
+
 impl InterruptController for X2Apic {
     /// Signals end of interrupt, see [`InterruptController::acknowledge`].
     ///
@@ -1256,6 +1331,17 @@ mod tests {
             .with_destination(5);
 
         assert_eq!(icr.raw(), 0x0000_0005_0000_4500);
+    }
+
+    /// The panic IPI is an NMI, delivery mode `100`, whose vector is ignored.
+    #[test]
+    fn nmi_ipi_encoding() {
+        let icr = X2ApicICR::new()
+            .with_delivery_mode(X2ApicDeliveryMode::Nmi)
+            .with_assert(true)
+            .with_destination(3);
+
+        assert_eq!(icr.raw(), 0x0000_0003_0000_4400);
     }
 
     /// A start-up IPI is delivery mode `110` with the start page as its

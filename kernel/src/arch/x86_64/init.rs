@@ -236,8 +236,15 @@ unsafe fn init_core(token: InitToken) -> InitToken {
     // A core without x2APIC simply goes on without: the x2APIC driver does
     // not register then, on the boot core, and nothing else uses it.
     //
-    // SAFETY: nothing on this core uses its local APIC yet.
-    let _ = unsafe { X2Apic::enable_local() };
+    // SAFETY: nothing on this core uses its local APIC yet. Once it is in
+    // x2APIC mode, its identifier can be read, and `__init_gs` has set the
+    // core's `CPUID`.
+    if unsafe { X2Apic::enable_local() } {
+        unsafe { X2Apic::record_local_id() };
+    }
+
+    // Counted once it can be reached, so that a panic waits for it to stop
+    crate::driver::ipi::core_online();
 
     token
 }

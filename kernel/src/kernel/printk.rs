@@ -1073,20 +1073,23 @@ unsafe fn message<'a>(block: NonNull<u8>, size: usize) -> Option<&'a str> {
 /// runs again. At worst the one message it had already taken out is lost.
 /// Buffers are not freed, since nothing runs afterwards, and the allocator
 /// may be what panicked.
+///
+/// The other cores are not stopped here: the panic handler does that before
+/// it reports, see `ipi::emergency_stop_others`. A message at
+/// [`LogLevel::Panic`] outside a panic leaves them running.
 pub fn __printk_emergency(message: Arguments<'_>) -> ! {
     // SAFETY: this core halts at the end, so the interrupt state never has to
     // be restored.
     unsafe { CPU::raw_disable_interrupts() };
 
-    // TODO(@MaxMade): Stop the other cores once there are any: send every
-    // other core a dedicated IPI whose handler acknowledges and halts, wait
-    // for all acknowledgements with a timeout, and then print.
-
-    // SAFETY: interrupts are masked on the only core there is, so nothing
-    // registers a console meanwhile.
+    // SAFETY: interrupts are masked on this core, and the panic handler has
+    // stopped the others, so nothing registers a console meanwhile.
     if let Some(console) = unsafe { Consoles::emergency_get() } {
         // SAFETY for every `emergency_write` below: interrupts are masked on
-        // the only core there is, so nothing else writes to the console.
+        // this core, and the panic handler has stopped the other cores, so
+        // nothing else writes to the console. A core that did not stop in
+        // time, or a `LogLevel::Panic` message outside a panic, may still,
+        // which at worst garbles the output.
         unsafe { console.emergency_write(&"\n\n") };
 
         loop {

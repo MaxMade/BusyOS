@@ -39,11 +39,12 @@ use crate::kernel::vec::Vec;
 use crate::utils::allocator::Allocator;
 
 // Defined by the kernel's linker script only. The bootloader links this crate
-// as a library, with neither the script nor a `.percpu` section, so in that
-// build the two accessors below panic rather than name the symbols. Naming
+// as a library, and the host tests build it for the host, both with neither
+// the script nor a `.percpu` section, so in those builds the two accessors
+// below panic rather than name the symbols. Naming
 // them would fail the bootloader's link as soon as any core-local access ends
 // up in it, even one it never runs.
-#[cfg(not(feature = "library"))]
+#[cfg(all(not(test), not(feature = "library")))]
 unsafe extern "C" {
     /// First byte of the `.percpu` template, defined by the linker script.
     static _percpu_start: u8;
@@ -56,14 +57,14 @@ unsafe extern "C" {
 }
 
 /// Address of the `.percpu` template, the block core 0 runs on.
-#[cfg(not(feature = "library"))]
+#[cfg(all(not(test), not(feature = "library")))]
 #[inline]
 fn template_start() -> usize {
     (&raw const _percpu_start) as usize
 }
 
 /// Distance between two core-local blocks.
-#[cfg(not(feature = "library"))]
+#[cfg(all(not(test), not(feature = "library")))]
 #[inline]
 fn stride() -> usize {
     (&raw const _percpu_stride) as usize
@@ -73,8 +74,8 @@ fn stride() -> usize {
 ///
 /// # Panics
 ///
-/// Always: there is no core-local storage outside the kernel.
-#[cfg(feature = "library")]
+/// Always: there is no core-local storage outside the kernel image.
+#[cfg(any(test, feature = "library"))]
 fn template_start() -> usize {
     panic!("core-local storage only exists in the kernel")
 }
@@ -83,8 +84,8 @@ fn template_start() -> usize {
 ///
 /// # Panics
 ///
-/// Always: there is no core-local storage outside the kernel.
-#[cfg(feature = "library")]
+/// Always: there is no core-local storage outside the kernel image.
+#[cfg(any(test, feature = "library"))]
 fn stride() -> usize {
     panic!("core-local storage only exists in the kernel")
 }

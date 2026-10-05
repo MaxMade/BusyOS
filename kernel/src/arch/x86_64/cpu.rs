@@ -485,6 +485,10 @@ impl crate::arch::generic::cpu::InterruptVector for InterruptVector {
         self.0 == Exceptions::PageFault as _
     }
 
+    fn is_non_maskable(&self) -> bool {
+        self.0 == Exceptions::NMI as _
+    }
+
     fn is_invalid_alignmnet(&self) -> bool {
         self.0 == Exceptions::AlignmentCheck as _
     }

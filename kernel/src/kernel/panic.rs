@@ -73,6 +73,8 @@ fn panic(panic_info: &PanicInfo) -> ! {
     static IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
     if IN_PROGRESS.swap(true, AtomicOrdering::Relaxed) {
+        // SAFETY: another panic is being reported, and this core holds
+        // nothing that the panicking core waits for.
         unsafe { CPU::halt() }
     }
 
@@ -83,6 +85,19 @@ fn panic(panic_info: &PanicInfo) -> ! {
 
     // First, before anything else overwrites the registers.
     CPU::state(cpu_state);
+
+    // SAFETY: this core halts at the end, so the interrupt state never has to
+    // be restored. Masked after the registers were captured, so that the
+    // dump shows the interrupt flag of the code that panicked.
+    unsafe { CPU::raw_disable_interrupts() };
+
+    // Stop every other core, so that nothing runs alongside the report and
+    // nothing changes what it shows. A core that does not stop in time is
+    // left running: there is nothing more to try, and the report is worth
+    // having regardless.
+    //
+    // SAFETY: interrupts are masked, and this core sends to the others only.
+    let _ = unsafe { crate::driver::ipi::emergency_stop_others() };
 
     let mut call_stack = [VirtualAddress::null(); BACKTRACE_DEPTH];
     let call_stack = CPU::unwind(&mut call_stack);

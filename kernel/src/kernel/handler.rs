@@ -173,6 +173,20 @@ impl<Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken> Epil
 pub fn handler(vector: InterruptVector, _stack_frame: *mut InterruptStackFrame) {
     assert!(CPU::interrupt_flag() == InterruptFlag::Disabled);
 
+    // A non-maskable interrupt is only ever sent to stop this core, by a
+    // core that is panicking, see `ipi::Mode::Panic`. Nothing is
+    // acknowledged and nothing else runs: the panicking core's output is the
+    // last thing that is to happen.
+    if vector.is_non_maskable() {
+        // Tell the panicking core that this one is quiet, see
+        // `ipi::emergency_stop_others`.
+        crate::driver::ipi::acknowledge_stop();
+
+        // SAFETY: the panicking core does not wait for anything this core
+        // holds.
+        unsafe { CPU::halt() }
+    }
+
     // Enter fake system level
     let root = unsafe { RootToken::forge() };
     let (level, mut token) = SyscallLevel::enter(root);

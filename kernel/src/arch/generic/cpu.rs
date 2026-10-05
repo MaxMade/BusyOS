@@ -168,6 +168,10 @@ where
     /// Whether this vector is the alignment-check exception.
     fn is_invalid_alignmnet(&self) -> bool;
 
+    /// Whether this vector is the non-maskable interrupt, which arrives even
+    /// with interrupts masked.
+    fn is_non_maskable(&self) -> bool;
+
     /// Whether this vector is one the architecture reserves for its own
     /// exceptions, such as a page fault or a general-protection fault.
     ///

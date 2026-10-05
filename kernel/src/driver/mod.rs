@@ -11,6 +11,7 @@
 pub mod acpi;
 pub mod console;
 pub mod framebuffer;
+pub mod ipi;
 pub mod irq;
 pub mod ksymbols;
 pub mod module;
