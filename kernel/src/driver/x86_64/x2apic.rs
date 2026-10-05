@@ -20,9 +20,13 @@
 //! a [`Module`], an [`InterruptController`], an [`IRQCapable`] device that
 //! owns the timer vector, and a [`Timer`].
 
+use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
 use bitfield_struct::bitfield;
 use driver_macro::module;
 
+use crate::arch::BOOT_CPUID;
+use crate::arch::generic::cpu::CPUID;
 use crate::{
     arch::{
         InterruptVector,
@@ -443,6 +447,23 @@ pub struct X2Apic {
     /// rate is not architectural and differs from machine to machine, so it
     /// has to be measured on each one.
     ticks_per_ms: usize,
+
+    /// Undivided timer ticks in all the periods that have expired so far,
+    /// added by [`IRQCapable::prologue`] on every expiry of the boot core's
+    /// timer. The other cores' timers are not counted, since this one counter
+    /// is shared by all of them.
+    ///
+    /// Together with the progress of the running period, this is what
+    /// [`Timer::nanoseconds_since`] converts. Counted at the undivided rate,
+    /// like [`ticks_per_ms`](X2Apic::ticks_per_ms), so that a change of
+    /// divisor between two periods does not change what a tick is worth.
+    total_ticks: AtomicUsize,
+
+    /// Undivided timer ticks in one period, as last set up by
+    /// [`Timer::setup`]: the initial count times the divisor.
+    ///
+    /// Zero until the timer has been set up.
+    period_ticks: AtomicUsize,
 }
 
 impl Module for X2Apic {
@@ -619,6 +640,8 @@ impl Module for X2Apic {
         let driver = Self {
             state: DriverTicketlock::new(Ticketlock::new(), state),
             ticks_per_ms,
+            total_ticks: AtomicUsize::new(0),
+            period_ticks: AtomicUsize::new(0),
         };
         let driver = match Arc::try_new(driver, token) {
             Ok((driver, t)) => {
@@ -746,7 +769,16 @@ impl IRQCapable for X2Apic {
     where
         Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
     {
-        // Nothing to do yet...
+        let cpuid = CPUID.with(|cpuid| *cpuid);
+        if cpuid == BOOT_CPUID {
+            // One period has expired. Added first thing, so that a reading of
+            // the time on the way out of the interrupt already counts it.
+            //
+            // Release, pairing with the acquire loads in `nanoseconds_since`.
+            let period = self.period_ticks.load(AtomicOrdering::Relaxed);
+            self.total_ticks.fetch_add(period, AtomicOrdering::Release);
+        }
+
         Ok((false, token))
     }
 
@@ -807,16 +839,87 @@ impl X2Apic {
             })
             .filter(|&(_, count)| count > 0)
     }
+
+    /// Undivided ticks the running period has counted so far.
+    ///
+    /// Zero for a timer that is stopped, and for a one-shot period that has
+    /// expired: the prologue counts that one in full.
+    fn running_period_ticks() -> usize {
+        // XXX: x2APIC is local; thus, no synchronisation
+        let (initial, current, divider) = unsafe {
+            (
+                X2ApicInitialCount::read().raw() as usize,
+                X2ApicCurrentCount::read().raw() as usize,
+                X2ApicDivide::read().divider(),
+            )
+        };
+
+        if current == 0 {
+            return 0;
+        }
+
+        initial.saturating_sub(current) * divider_factor(divider)
+    }
+
+    /// Whether the timer's vector is pending, that is raised but not yet
+    /// taken by the core.
+    fn timer_pending() -> bool {
+        // XXX: x2APIC is local; thus, no synchronisation
+        let vector = unsafe { X2ApicLVTTimer::read() }.vector() as u32;
+
+        // The interrupt request register is split over eight MSRs from
+        // 0x820, 32 vectors each, and only the low half of each is used.
+        let low: u32;
+        // SAFETY: the local APIC is in x2APIC mode, so these MSRs exist, and
+        // reading one has no side effects.
+        unsafe {
+            core::arch::asm!(
+                "rdmsr",
+                in("ecx") 0x820 + vector / 32,
+                out("eax") low,
+                out("edx") _,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+
+        low & (1 << (vector % 32)) != 0
+    }
+
+    /// Converts undivided timer ticks into nanoseconds.
+    ///
+    /// Split into whole milliseconds and a remainder, the same way
+    /// [`configuration`](X2Apic::configuration) does it the other way round,
+    /// so that the remainder is not lost and no product overflows: the
+    /// remainder is below [`ticks_per_ms`](X2Apic::ticks_per_ms).
+    fn ticks_to_nanoseconds(&self, ticks: usize) -> NanoSeconds {
+        let ms = ticks / self.ticks_per_ms;
+        let rest = ticks % self.ticks_per_ms;
+
+        NanoSeconds::from(ms * 1_000_000 + rest * 1_000_000 / self.ticks_per_ms)
+    }
+}
+
+/// The factor `mode` divides the timer's input clock by.
+fn divider_factor(mode: X2ApicDivideMode) -> usize {
+    DIVIDERS
+        .iter()
+        .find(|&&(_, candidate)| candidate == mode)
+        .map(|&(factor, _)| factor)
+        .unwrap_or(1)
 }
 
 impl Timer for X2Apic {
     /// Arms the timer to expire after `interval`, see [`Timer::setup`].
     ///
     /// The divisor and count are chosen by [`X2Apic::configuration`]. The
-    /// divisor is written first, since writing the initial count is what
-    /// starts the timer, and it should not start counting at the old rate.
-    /// The timer mode and the mask in the local vector table are left as they
-    /// are, so after [`X2Apic::init`] the timer fires once per call.
+    /// mode in the local vector table, periodic or one-shot, is written
+    /// first and the initial count last, since writing the count is what
+    /// starts the timer, and it should not start in the old mode or at the
+    /// old rate. The mask is left as it is: [`IRQCapable::enable_irqs`]
+    /// unmasks the timer.
+    ///
+    /// The length of one period is recorded for
+    /// [`nanoseconds_since`](Timer::nanoseconds_since).
     ///
     /// The timer programmed is the one of the calling core, since every core
     /// only reaches its own local APIC.
@@ -839,6 +942,11 @@ impl Timer for X2Apic {
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
+        let (mode, count) = match self.configuration(interval) {
+            Some(configuration) => configuration,
+            None => return Err((Errno::EINVAL, token)),
+        };
+
         // XXX: x2APIC is local; thus, no synchronisation
         unsafe {
             let mut lvtt_timer = X2ApicLVTTimer::read();
@@ -849,15 +957,15 @@ impl Timer for X2Apic {
             lvtt_timer.write();
         }
 
-        let (mode, count) = match self.configuration(interval) {
-            Some(configuration) => configuration,
-            None => return Err((Errno::EINVAL, token)),
-        };
-
         // XXX: x2APIC is local; thus, no synchronisation
         let mut divider = unsafe { X2ApicDivide::read() };
         divider.set_divider(mode);
         unsafe { divider.write() };
+
+        // Recorded before the count is written, since writing it is what
+        // starts the period.
+        let period = count as usize * divider_factor(mode);
+        self.period_ticks.store(period, AtomicOrdering::Relaxed);
 
         // XXX: x2APIC is local; thus, no synchronisation
         unsafe {
@@ -866,6 +974,59 @@ impl Timer for X2Apic {
         }
 
         Ok(token)
+    }
+
+    /// The time the timer has counted since it was first set up, see
+    /// [`Timer::nanoseconds_since`].
+    ///
+    /// Made up of the periods that have expired, which the prologue adds to
+    /// [`total_ticks`](X2Apic::total_ticks), and the progress of the running
+    /// period, which the count registers show. Precise to one tick of the
+    /// undivided clock, rather than to a whole period or millisecond.
+    ///
+    /// Two races are dealt with:
+    ///
+    /// - An expiry handled while the registers are being read changes
+    ///   `total_ticks`, and the reading is taken again.
+    /// - An expiry that has happened but whose interrupt is still pending,
+    ///   for example because the caller has interrupts masked, has already
+    ///   reloaded the count without being in `total_ticks` yet. It is
+    ///   recognised by the timer's vector being pending, and added here, so
+    ///   that the time never appears to go backwards. The pending bit is read
+    ///   before and after the count, and the reading is taken again if an
+    ///   expiry fell in between.
+    ///
+    /// Only the boot core's expiries are counted, see
+    /// [`IRQCapable::prologue`], while the count registers read are those of
+    /// the calling core. So this is only correct on the boot core, which is
+    /// the only one running so far.
+    fn nanoseconds_since<Token>(&self, token: Token) -> (NanoSeconds, Token)
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        loop {
+            // Acquire, pairing with the release in the prologue.
+            let before = self.total_ticks.load(AtomicOrdering::Acquire);
+
+            // Whether an expiry is pending, on both sides of the count: only
+            // if the two agree do the count and the pending bit describe the
+            // same side of an expiry. An expiry between the count and a
+            // single check would either count the old period twice or miss
+            // the reload, depending on the order.
+            let pending_before = Self::timer_pending();
+            let running = Self::running_period_ticks();
+            let pending_after = Self::timer_pending();
+
+            let after = self.total_ticks.load(AtomicOrdering::Acquire);
+            if before == after && pending_before == pending_after {
+                let pending = match pending_after {
+                    true => self.period_ticks.load(AtomicOrdering::Relaxed),
+                    false => 0,
+                };
+                let ticks = before + running + pending;
+                return (self.ticks_to_nanoseconds(ticks), token);
+            }
+        }
     }
 }
 

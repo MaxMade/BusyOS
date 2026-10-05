@@ -207,6 +207,5 @@ pub extern "C" fn start() -> i32 {
 
     init_level.leave(token);
 
-    unsafe { CPU::raw_enable_interrupts() };
-    loop {}
+    todo!();
 }

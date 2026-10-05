@@ -38,6 +38,12 @@ use crate::kernel::spsc::SPSC;
 use crate::kernel::vec::Vec;
 use crate::utils::allocator::Allocator;
 
+// Defined by the kernel's linker script only. The bootloader links this crate
+// as a library, with neither the script nor a `.percpu` section, so in that
+// build the two accessors below panic rather than name the symbols. Naming
+// them would fail the bootloader's link as soon as any core-local access ends
+// up in it, even one it never runs.
+#[cfg(not(feature = "library"))]
 unsafe extern "C" {
     /// First byte of the `.percpu` template, defined by the linker script.
     static _percpu_start: u8;
@@ -49,10 +55,38 @@ unsafe extern "C" {
     static _percpu_stride: u8;
 }
 
+/// Address of the `.percpu` template, the block core 0 runs on.
+#[cfg(not(feature = "library"))]
+#[inline]
+fn template_start() -> usize {
+    (&raw const _percpu_start) as usize
+}
+
 /// Distance between two core-local blocks.
+#[cfg(not(feature = "library"))]
 #[inline]
 fn stride() -> usize {
     (&raw const _percpu_stride) as usize
+}
+
+/// See the kernel build of this function.
+///
+/// # Panics
+///
+/// Always: there is no core-local storage outside the kernel.
+#[cfg(feature = "library")]
+fn template_start() -> usize {
+    panic!("core-local storage only exists in the kernel")
+}
+
+/// See the kernel build of this function.
+///
+/// # Panics
+///
+/// Always: there is no core-local storage outside the kernel.
+#[cfg(feature = "library")]
+fn stride() -> usize {
+    panic!("core-local storage only exists in the kernel")
 }
 
 /// Base address of `cpu_id`'s core-local block.
@@ -65,7 +99,7 @@ fn stride() -> usize {
 /// beyond it simply yields an address past the last block.
 #[inline]
 pub fn block_base(cpu_id: usize) -> *const c_void {
-    let addr = (&raw const _percpu_start) as usize + cpu_id * stride();
+    let addr = template_start() + cpu_id * stride();
     addr as _
 }
 
@@ -467,7 +501,7 @@ impl<T> PerCPU<T> {
     /// PIE relocation, since both operands are shifted by the same base.
     #[inline]
     fn block_offset(&self) -> usize {
-        self as *const Self as usize - (&raw const _percpu_start) as usize
+        self as *const Self as usize - template_start()
     }
 
     /// Offset of `cpu_id`'s copy of this variable, relative to

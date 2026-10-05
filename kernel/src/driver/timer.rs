@@ -82,6 +82,19 @@ pub trait Timer: IRQCapable {
     ) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken;
+
+    /// The time the timer has counted since it was first set up.
+    ///
+    /// Monotonic, and as precise as the timer's clock allows: it includes
+    /// the progress of the running period, not only the periods that have
+    /// expired.
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned.
+    fn nanoseconds_since<Token>(&self, token: Token) -> (NanoSeconds, Token)
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken;
 }
 
 /// A handle on a registered timer driver.
@@ -200,6 +213,17 @@ impl Timer for TimerDriver {
         match self {
             #[cfg(target_arch = "x86_64")]
             TimerDriver::X2Apic(x2apic) => x2apic.setup(interval, peridoc, token),
+        }
+    }
+
+    /// Forwards to the concrete timer, see [`Timer::nanoseconds_since`].
+    fn nanoseconds_since<Token>(&self, token: Token) -> (NanoSeconds, Token)
+    where
+        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+    {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            TimerDriver::X2Apic(x2apic) => x2apic.nanoseconds_since(token),
         }
     }
 }
