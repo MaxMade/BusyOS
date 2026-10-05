@@ -15,6 +15,7 @@ use crate::{
     kernel::printk::LogLevel,
     printkln,
 };
+use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 /// Room for the register state [`panic`] captures.
 ///
@@ -69,6 +70,12 @@ impl Display for Backtrace<'_> {
 
 #[panic_handler]
 fn panic(panic_info: &PanicInfo) -> ! {
+    static IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+    if IN_PROGRESS.swap(true, AtomicOrdering::Relaxed) {
+        unsafe { CPU::halt() }
+    }
+
     // SAFETY: nothing else refers to `CPU_STATE`, see `StateCell`, and every
     // field of the state is a plain integer or register value, for which all
     // zeros is valid.
