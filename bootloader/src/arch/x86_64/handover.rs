@@ -1,0 +1,139 @@
+use core::ffi::c_void;
+
+use busyos::{
+    arch::{
+        CPU,
+        generic::paging::{Paging as _, PhysicalAddress, VirtualAddress},
+    },
+    driver::framebuffer::{Configuration as FramebufferConfiguration, Format as FramebufferFormat},
+    kernel::{
+        bootinfo::{AP_TRAMPOLINE_PAGES, Bootinfo},
+        locking::{CanAcquire, PreviousToken, level::Epilogue},
+    },
+};
+use uefi::{
+    proto::console::gop::{GraphicsOutput, PixelFormat},
+    table::cfg::ConfigTableEntry,
+};
+
+use crate::paging::Paging;
+
+unsafe extern "C" {
+    fn _start() -> i32;
+}
+
+pub struct HandOver {
+    /// Temporary page tables used to jump into the higher half.
+    paging: Paging,
+
+    /// Virtual address of the kernel entry symbol.
+    entry: VirtualAddress<c_void>,
+}
+
+impl crate::arch::generic::handover::HandOver for HandOver {
+    fn prepare<Token>(bootinfo: &mut Bootinfo, token: Token) -> (Self, Token)
+    where
+        Token: CanAcquire<Epilogue> + PreviousToken,
+    {
+        // Save UEFI `cr3` register
+        bootinfo.arch_bootinfo.uefi_cr3 = busyos::arch::x86_64::paging::CR3::read();
+
+        // TODO(@MaxMade): Save address of UEFI's GDT
+
+        // TODO(@MaxMade): Save address of UEFI's IDT
+
+        // Save value of UEFI's `gs` register
+        bootinfo.arch_bootinfo.gs = unsafe { CPU::gs_base() };
+
+        // Save address of RSDP
+        let rsdp = uefi::system::with_config_table(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.guid == ConfigTableEntry::ACPI2_GUID)
+                .or_else(|| {
+                    entries
+                        .iter()
+                        .find(|entry| entry.guid == ConfigTableEntry::ACPI_GUID)
+                })
+                .map(|entry| PhysicalAddress::new(entry.address as _))
+        });
+
+        bootinfo.arch_bootinfo.rsdp = match rsdp {
+            Some(rsdp) => rsdp,
+            None => panic!("Unable to find RSDP"),
+        };
+
+        // Reserve the area the other cores start in. A core starts in real
+        // mode, so it has to lie below 1 MiB. Loader data is never handed to
+        // the kernel as free memory, so nothing else will use it.
+        bootinfo.ap_trampoline = match uefi::boot::allocate_pages(
+            uefi::boot::AllocateType::MaxAddress(0xF_FFFF),
+            uefi::boot::MemoryType::LOADER_DATA,
+            AP_TRAMPOLINE_PAGES,
+        ) {
+            Ok(area) => PhysicalAddress::new(area.as_ptr().cast()),
+            // Not fatal: the boot core runs regardless, only the others stay
+            // off.
+            Err(_) => PhysicalAddress::null(),
+        };
+
+        // Save the address of `_start` symbol
+        let entry = bootinfo.kernel_start_symbol;
+
+        // Prepare temporary mapping for jumping to higher half kernel
+        let (paging, token) = crate::paging::prepare_handover(token);
+
+        // Get framebuffer configuration
+        let handle = match uefi::boot::get_handle_for_protocol::<GraphicsOutput>() {
+            Ok(handle) => handle,
+            Err(error) => panic!(
+                "Unable to get handle for Graphic Output Protocol: {}",
+                error
+            ),
+        };
+
+        let mut gop = match uefi::boot::open_protocol_exclusive::<GraphicsOutput>(handle) {
+            Ok(gop) => gop,
+            Err(error) => panic!(
+                "Unable to open protocol for Graphic Output Protocol: {}",
+                error
+            ),
+        };
+
+        let info = gop.current_mode_info();
+        let (width, height) = info.resolution();
+        let stride = info.stride();
+
+        let format = match info.pixel_format() {
+            PixelFormat::Rgb => FramebufferFormat::Rgb,
+            PixelFormat::Bgr => FramebufferFormat::Bgr,
+            _ => panic!("Unable to determine Framebuffer configuration"),
+        };
+
+        let addr = gop.frame_buffer().as_mut_ptr();
+        bootinfo.framebuffer_config = FramebufferConfiguration::new(
+            PhysicalAddress::new(addr as _),
+            height,
+            width,
+            stride,
+            format,
+        );
+
+        (Self { paging, entry }, token)
+    }
+
+    unsafe fn handover(&mut self, cpu_id: usize) -> bool {
+        // Activate temporary mapping
+        unsafe { self.paging.activate() };
+
+        // Jump to BUSYOS kernel
+        let ptr = self.entry.as_ptr() as *const c_void;
+
+        let entry: extern "C" fn(usize) -> i32 = unsafe { core::mem::transmute(ptr) };
+
+        // TODO(@MaxMade): Currently only one CPU supported...
+        let success = entry(cpu_id) == 0;
+
+        success
+    }
+}

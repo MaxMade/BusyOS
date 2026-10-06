@@ -1,0 +1,201 @@
+use core::array;
+use core::cell::UnsafeCell;
+use core::ffi::c_void;
+use core::mem::MaybeUninit;
+
+use crate::arch::Bootinfo as ArchBootinfo;
+use crate::arch::generic::paging::{PhysicalAddress, VirtualAddress};
+use crate::driver::framebuffer::{
+    Configuration as FramebufferConfiguration, Format as FramebufferFormat,
+};
+use crate::utils::range_tree::Range;
+
+/// Pages the bootloader reserves below 1 MiB for starting the other cores.
+///
+/// A core starts in real mode, at a page below 1 MiB that the start-up IPI
+/// names, so the code it starts with and everything it needs before it can
+/// reach the rest of memory has to live down there:
+///
+/// | Page | Holds |
+/// |------|-------|
+/// | 0    | the start-up code, copied there by the kernel, and its data |
+/// | 1    | a PML4 for the switch to long mode |
+/// | 2    | the PDPT below it |
+/// | 3    | the page directory below that |
+/// | 4    | a temporary stack |
+pub const AP_TRAMPOLINE_PAGES: usize = 5;
+
+/// One entry of the kernel's symbol table, as the bootloader hands it over.
+///
+/// The bootloader builds the table from the kernel ELF's `.symtab`, keeps
+/// only the symbols the kernel defines and that have a name, and sorts them
+/// by [`addr`](Self::addr). The kernel only ever reads it, see
+/// [`KSymbols`](crate::driver::ksymbols::KSymbols).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct KernelSymbol {
+    /// Link-time virtual address the symbol starts at.
+    pub addr: VirtualAddress<c_void>,
+
+    /// Number of bytes the symbol spans, zero where the ELF file does not
+    /// say, as for assembly labels and linker script symbols.
+    pub size: usize,
+
+    /// Physical address of the name, which lies in the kernel ELF file. Not
+    /// NUL-terminated, see [`name_len`](Self::name_len).
+    pub name: PhysicalAddress<u8>,
+
+    /// Length of the name in bytes.
+    pub name_len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct Bootinfo {
+    /// Number of available CPUs.
+    pub num_cpus: usize,
+
+    /// Offset between every virtual and physical address of the kernel
+    pub kernel_virt_phys_offset: usize,
+
+    /// Virtual address of the `_start` symbol.
+    pub kernel_start_symbol: VirtualAddress<c_void>,
+
+    /// Physical address of the kernel ELF file.
+    pub kernel_elf_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel ELF file in physical memory.
+    pub kernel_elf_size: usize,
+
+    /// Physical address of the kernel's symbol table, see [`KernelSymbol`].
+    pub kernel_symbols: PhysicalAddress<KernelSymbol>,
+
+    /// Number of entries in the kernel's symbol table.
+    pub kernel_symbols_len: usize,
+
+    /// Physical address of the area the other cores start in, see
+    /// [`AP_TRAMPOLINE_PAGES`], or null if the bootloader could not reserve
+    /// one.
+    pub ap_trampoline: PhysicalAddress<c_void>,
+
+    /// Physical address of the kernel `.text` segment.
+    pub kernel_text_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel `.text` segment.
+    pub kernel_text_size: usize,
+
+    /// Physical address of the kernel `.rodata` segment.
+    pub kernel_rodata_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel `.rodata` segment.
+    pub kernel_rodata_size: usize,
+
+    /// Physical address of the kernel `.data` segment.
+    pub kernel_data_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel `.data` segment.
+    pub kernel_data_size: usize,
+
+    /// Physical address of the kernel `.bss` segment.
+    pub kernel_bss_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel `.bss` segment.
+    pub kernel_bss_size: usize,
+
+    /// Physical address of the kernel `.percpu` segment.
+    ///
+    /// This is core 0's block: the bootloader replicates the template in
+    /// place, so the first block is the template itself.
+    pub kernel_percpu_start: PhysicalAddress<c_void>,
+
+    /// Size of the kernel `.percpu` segment, spanning the blocks of *all*
+    /// [`num_cpus`](Self::num_cpus) cores rather than a single one.
+    ///
+    /// The blocks sit one stride apart in one contiguous range, so mapping
+    /// this range maps every core's block.
+    pub kernel_percpu_size: usize,
+
+    pub memory_ranges: [Range<PhysicalAddress<c_void>, usize>; 64],
+
+    pub framebuffer_config: FramebufferConfiguration,
+
+    /// Architecture-specific boot information
+    pub arch_bootinfo: ArchBootinfo,
+}
+
+impl Default for Bootinfo {
+    fn default() -> Self {
+        Self {
+            kernel_virt_phys_offset: 0,
+            kernel_start_symbol: VirtualAddress::null(),
+            kernel_elf_start: PhysicalAddress::null(),
+            kernel_elf_size: 0,
+            kernel_symbols: PhysicalAddress::null(),
+            kernel_symbols_len: 0,
+            ap_trampoline: PhysicalAddress::null(),
+            arch_bootinfo: Default::default(),
+            kernel_text_start: PhysicalAddress::null(),
+            kernel_text_size: 0,
+            kernel_rodata_start: PhysicalAddress::null(),
+            kernel_rodata_size: 0,
+            kernel_data_start: PhysicalAddress::null(),
+            kernel_data_size: 0,
+            kernel_bss_start: PhysicalAddress::null(),
+            kernel_bss_size: 0,
+            kernel_percpu_start: PhysicalAddress::null(),
+            kernel_percpu_size: 0,
+            num_cpus: 0,
+            memory_ranges: array::from_fn(|_| Range::new(PhysicalAddress::null(), 0)),
+            framebuffer_config: FramebufferConfiguration::new(
+                PhysicalAddress::null(),
+                0,
+                0,
+                0,
+                FramebufferFormat::Rgb,
+            ),
+        }
+    }
+}
+
+/// Storage for the boot information, which the bootloader fills in from the
+/// outside.
+///
+/// The bootloader finds [`BOOTINFO`] by its symbol and writes a [`Bootinfo`]
+/// into it before the kernel runs. The compiler cannot see that write, so a
+/// plain immutable `static` would be one it may assume still holds the
+/// all-zero value it was declared with, and an optimised build does fold its
+/// reads to zero. The [`UnsafeCell`] tells the compiler that the contents can
+/// change behind its back, which keeps every read a real load.
+///
+/// `#[repr(transparent)]` keeps the symbol pointing at a plain [`Bootinfo`],
+/// which is what the bootloader writes.
+#[repr(transparent)]
+pub struct BootinfoCell(UnsafeCell<MaybeUninit<Bootinfo>>);
+
+// SAFETY: the bootloader writes the boot information before the kernel runs,
+// and the kernel only ever reads it, so every core sees the same unchanging
+// value.
+unsafe impl Sync for BootinfoCell {}
+
+impl BootinfoCell {
+    /// The boot information the bootloader handed over.
+    ///
+    /// # Safety
+    ///
+    /// The bootloader must have filled it in, which is the case from the
+    /// kernel's first instruction on, and nothing may write to it while the
+    /// returned reference lives.
+    pub unsafe fn assume_init_ref(&self) -> &Bootinfo {
+        // SAFETY: see the function's contract.
+        unsafe { (*self.0.get()).assume_init_ref() }
+    }
+}
+
+/// The boot information, written by the bootloader before the kernel runs.
+///
+/// Placed in `.data` on purpose. Being all zeros, it would otherwise land in
+/// `.bss`, which the startup code is entitled to zero after the bootloader
+/// has written into it.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".data.bootinfo")]
+pub static BOOTINFO: BootinfoCell = BootinfoCell(UnsafeCell::new(MaybeUninit::zeroed()));

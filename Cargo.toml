@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "bootloader",
+    "kernel", "xtask",
+]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+
+# The demangler runs on the panic path, whose stack is small, and recurses
+# for nested generic names. Optimised, its frames are a fraction of the size.
+[profile.dev.package.rustc-demangle]
+opt-level = 3
+
+[profile.release]
+panic = "abort"

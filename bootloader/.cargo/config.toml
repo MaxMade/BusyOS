@@ -1,0 +1,7 @@
+[alias]
+build-x86_64  = "build --target x86_64-unknown-uefi"
+
+[target.x86_64-unknown-uefi]
+rustflags = [
+  "-C", "panic=abort",
+]
