@@ -112,6 +112,34 @@ pub trait CPU {
     /// Safe to call on the panic path: it takes no lock, allocates nothing
     /// and only reads the current stack.
     fn unwind(call_stack: &mut [VirtualAddress<c_void>]) -> &mut [VirtualAddress<c_void>];
+
+    /// Stores `value` in the bits of `virt_addr` that the architecture does
+    /// not use to address memory, replacing any value stored there before.
+    ///
+    /// The result is no valid address until the value is taken out again:
+    /// encoding `0` turns it back into the address it was made from, which
+    /// is how the plain address is recovered after
+    /// [`try_decode`](Self::try_decode).
+    ///
+    /// Lock-free data structures use this to pair a pointer with a counter in
+    /// one word, so that a single compare-and-swap covers both.
+    ///
+    /// # Errors
+    ///
+    /// The maximum value an address can carry, if `value` exceeds it.
+    fn try_encode<T>(
+        virt_addr: VirtualAddress<T>,
+        value: usize,
+    ) -> Result<VirtualAddress<T>, usize>;
+
+    /// Takes out the value [`try_encode`](Self::try_encode) stored in
+    /// `virt_addr`, or `0` if none was.
+    ///
+    /// # Errors
+    ///
+    /// The maximum value an address can carry, if `virt_addr` holds a value
+    /// that `try_encode` could not have stored.
+    fn try_decode<T>(virt_addr: VirtualAddress<T>) -> Result<usize, usize>;
 }
 
 core_local! {

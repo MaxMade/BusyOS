@@ -329,6 +329,58 @@ impl crate::arch::generic::cpu::CPU for CPU {
 
         &mut call_stack[..len]
     }
+
+    /// Stores `value` in bits 63 to 48, which four-level paging leaves to
+    /// sign-extend bit 47 and does not translate.
+    ///
+    /// The bits hold `value` XORed with that sign extension, so that a
+    /// canonical address is one carrying `0` in either half: encoding `0`
+    /// gives back a canonical address, and any other value a non-canonical
+    /// one that faults with `#GP` if dereferenced by mistake.
+    fn try_encode<T>(
+        virt_addr: VirtualAddress<T>,
+        value: usize,
+    ) -> Result<VirtualAddress<T>, usize> {
+        if value > MAX_ENCODED_VALUE {
+            return Err(MAX_ENCODED_VALUE);
+        }
+
+        let ptr = virt_addr.as_ptr().map_addr(|addr| {
+            (addr & ADDRESS_MASK) | ((value ^ sign_extension(addr)) << VIRTUAL_ADDRESS_BITS)
+        });
+
+        Ok(VirtualAddress::new(ptr))
+    }
+
+    /// Takes out bits 63 to 48, undoing the XOR with the sign extension of bit
+    /// 47. Every value they can hold is one
+    /// [`try_encode`](crate::arch::generic::cpu::CPU::try_encode) accepts, so
+    /// this never fails.
+    fn try_decode<T>(virt_addr: VirtualAddress<T>) -> Result<usize, usize> {
+        let addr = virt_addr.addr();
+        Ok((addr >> VIRTUAL_ADDRESS_BITS) ^ sign_extension(addr))
+    }
+}
+
+/// Bits of a virtual address four-level paging translates. Bits 63 to 48 have
+/// to be copies of bit 47.
+const VIRTUAL_ADDRESS_BITS: u32 = 48;
+
+/// Selects the translated bits of a virtual address.
+const ADDRESS_MASK: usize = (1 << VIRTUAL_ADDRESS_BITS) - 1;
+
+/// Largest value [`try_encode`](crate::arch::generic::cpu::CPU::try_encode)
+/// can store in the bits above [`VIRTUAL_ADDRESS_BITS`].
+const MAX_ENCODED_VALUE: usize = usize::MAX >> VIRTUAL_ADDRESS_BITS;
+
+/// What bits 63 to 48 of `addr` hold if it is canonical, shifted down: all
+/// ones in the upper half, all zeros in the lower one.
+const fn sign_extension(addr: usize) -> usize {
+    if addr & (1 << (VIRTUAL_ADDRESS_BITS - 1)) != 0 {
+        MAX_ENCODED_VALUE
+    } else {
+        0
+    }
 }
 
 impl CPU {
@@ -678,4 +730,72 @@ extern "C" fn __interrupt_handler(vector: u64, state: *mut InterruptStackFrame) 
     let vector = InterruptVector::from_raw(vector as _);
 
     handler(vector, state);
+}
+
+#[cfg(test)]
+mod tests {
+    use core::ptr;
+
+    use crate::arch::generic::cpu::CPU as _;
+
+    use super::*;
+
+    /// An address in the lower half, such as a user or host-test one.
+    const LOWER: usize = 0x0000_7fff_dead_b000;
+
+    /// An address in the upper half, such as a kernel one.
+    const UPPER: usize = 0xffff_8000_dead_b000;
+
+    fn address(addr: usize) -> VirtualAddress<u64> {
+        VirtualAddress::new(ptr::without_provenance_mut(addr))
+    }
+
+    #[test]
+    fn canonical_addresses_carry_zero() {
+        for addr in [0, LOWER, UPPER, usize::MAX] {
+            assert_eq!(CPU::try_decode(address(addr)), Ok(0));
+        }
+    }
+
+    #[test]
+    fn round_trips_every_half() {
+        for addr in [LOWER, UPPER] {
+            for value in [0, 1, 0x1234, MAX_ENCODED_VALUE] {
+                let encoded = CPU::try_encode(address(addr), value).unwrap();
+                assert_eq!(CPU::try_decode(encoded), Ok(value));
+
+                // The address bits are untouched, and encoding `0` restores
+                // the canonical address.
+                assert_eq!(encoded.addr() & ADDRESS_MASK, addr & ADDRESS_MASK);
+                let plain = CPU::try_encode(encoded, 0).unwrap();
+                assert_eq!(plain.addr(), addr);
+            }
+        }
+    }
+
+    #[test]
+    fn encoding_replaces_the_previous_value() {
+        let once = CPU::try_encode(address(UPPER), 7).unwrap();
+        let twice = CPU::try_encode(once, 9).unwrap();
+        assert_eq!(CPU::try_decode(twice), Ok(9));
+    }
+
+    #[test]
+    fn values_beyond_the_spare_bits_are_refused() {
+        assert_eq!(MAX_ENCODED_VALUE, 0xffff);
+        assert_eq!(
+            CPU::try_encode(address(LOWER), MAX_ENCODED_VALUE + 1).map(|addr| addr.addr()),
+            Err(MAX_ENCODED_VALUE)
+        );
+    }
+
+    #[test]
+    fn keeps_provenance() {
+        let mut value = 42u64;
+        let addr = VirtualAddress::from_mut(&mut value);
+
+        let encoded = CPU::try_encode(addr, 3).unwrap();
+        let plain = CPU::try_encode(encoded, 0).unwrap();
+        assert_eq!(unsafe { plain.read() }, 42);
+    }
 }
