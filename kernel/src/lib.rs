@@ -7,5 +7,6 @@ pub mod arch;
 pub mod driver;
 pub mod kernel;
 pub mod mem;
+pub mod sched;
 pub mod user;
 pub mod utils;

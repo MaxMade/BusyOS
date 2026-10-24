@@ -20,6 +20,20 @@ use crate::{
     printkln,
 };
 
+/// One stay on the epilogue level of the calling core.
+///
+/// While a core is on the level, an interrupt only runs its prologue, and its
+/// epilogue is deferred until the outermost stay is
+/// [`left`](Epilogue::leave). Interrupt handling enters the level for every
+/// interrupt ([`enter_from_vector`](Epilogue::enter_from_vector)) and runs the
+/// epilogue right away if the core was not on it already; thread context
+/// enters it explicitly ([`enter`](Epilogue::enter)), and kernel code runs on
+/// it, so that a thread holding a spinning lock is never preempted.
+///
+/// Every context switch happens on the level and hands it over to the thread
+/// switched to: the flag is per core, while the stay is the thread's. A
+/// resumed thread leaves it on the way out of its own stay, a new thread takes
+/// it over with [`adopt`](Epilogue::adopt).
 pub struct Epilogue<Token>
 where
     Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
@@ -37,7 +51,44 @@ core_local! {
 }
 
 impl<Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken> Epilogue<Token> {
+    /// Enters the epilogue level from thread context, e.g. on the way into a
+    /// system call or into the scheduler.
+    ///
+    /// While on the level, an interrupt on this core only runs its prologue.
+    /// Its epilogue is deferred and runs when the outermost level is left, see
+    /// [`leave`](Self::leave).
+    pub fn enter(token: Token) -> Self {
+        Self::enter_with(token, None)
+    }
+
+    /// Takes over the epilogue level a context switch handed to a new thread,
+    /// so that the thread can leave it, see
+    /// [`ThreadEntry`](crate::sched::thread::ThreadEntry).
+    ///
+    /// # Safety
+    ///
+    /// The calling thread must be new, with the level its first switch handed
+    /// over still held, and take it over at most once.
+    pub unsafe fn adopt(token: Token) -> Self {
+        assert!(ON_EPILOGUE_LEVEL.with(|epilogue_level| *epilogue_level));
+
+        Self {
+            token: Some(token),
+            vector: None,
+            // The level was entered by the switching thread, so this one is
+            // the outermost and leaving it runs what was deferred.
+            prev_on_epilogue_level: false,
+            interrupt_flag: CPU::interrupt_flag(),
+        }
+    }
+
+    /// Enters the epilogue level for the interrupt that raised `vector`, see
+    /// [`execute_or_defer`](Self::execute_or_defer).
     pub fn enter_from_vector(token: Token, vector: InterruptVector) -> Self {
+        Self::enter_with(token, Some(vector))
+    }
+
+    fn enter_with(token: Token, vector: Option<InterruptVector>) -> Self {
         let interrupt_flag = CPU::interrupt_flag();
 
         // Reading and setting the flag has to be one step with respect to this
@@ -55,10 +106,28 @@ impl<Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken> Epil
             token: Some(token),
             interrupt_flag,
             prev_on_epilogue_level,
-            vector: Some(vector),
+            vector,
         }
     }
 
+    /// Runs `f` on the epilogue level, with the level's token.
+    pub fn execute<R, F>(&mut self, f: F) -> R
+    where
+        F: FnOnce(Token) -> (R, Token),
+    {
+        let token = self.token.take().unwrap();
+        let (result, token) = f(token);
+        self.token = Some(token);
+
+        result
+    }
+
+    /// Runs the epilogue of `driver` for the interrupt this stay was entered
+    /// for, with interrupts enabled, or defers it if the core was on the level
+    /// already, until the outermost stay is left.
+    ///
+    /// The epilogue may switch threads, see [`Epilogue`]; this returns once
+    /// the interrupted thread runs again.
     pub fn execute_or_defer(&mut self, driver: &IRQCapableDriver) {
         if self.prev_on_epilogue_level {
             let vector = match self.vector.take() {
@@ -111,6 +180,12 @@ impl<Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken> Epil
         }
     }
 
+    /// Leaves the epilogue level.
+    ///
+    /// The outermost stay first runs every epilogue deferred meanwhile, with
+    /// interrupts enabled — each of which may switch threads — and then
+    /// clears the core's flag. The interrupt flag is restored to what it was
+    /// when the stay began.
     pub fn leave(mut self) -> Token {
         let mut token = self.token.take().unwrap();
 

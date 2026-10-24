@@ -11,6 +11,9 @@ use crate::kernel::prologue_lock::PrologueLock;
 #[lock_id(Driver)]
 pub struct SpinlockDriverID;
 
+#[lock_id(Scheduler)]
+pub struct SpinlockSchedulerID;
+
 #[lock_id(Thread)]
 pub struct SpinlockThreadID;
 
@@ -86,6 +89,13 @@ impl<Id: LockId> HierarchicalLock for Spinlock<Id> {
 /// not sleep: every waiter spins for as long as it does.
 pub type DriverSpinlock<T> = Lock<T, Spinlock<SpinlockDriverID>>;
 
+/// Scheduler-level spinlock.
+///
+/// [`level::Scheduler`] is the boundary between blocking and spinning locks:
+/// sleeping *is* acquiring this level, so a hold may not sleep, and the
+/// scheduler may take a thread lock while it holds this one.
+pub type SchedulerSpinlock<T> = Lock<T, Spinlock<SpinlockSchedulerID>>;
+
 /// Thread-level spinlock.
 ///
 /// [`level::Thread`] is below the scheduler, so this is a spinning lock in
@@ -102,6 +112,9 @@ pub type PrologueSpinlock<T> = PrologueLock<T, Spinlock<SpinlockPrologueID>>;
 
 #[lock_id(Driver)]
 pub struct RWSpinlockDriverID;
+
+#[lock_id(Scheduler)]
+pub struct RWSpinlockSchedulerID;
 
 #[lock_id(Thread)]
 pub struct RWSpinlockThreadID;
@@ -216,6 +229,11 @@ impl<Id: LockId> HierarchicalLock for RWSpinlock<Id> {
 /// not sleep: every waiter spins for as long as it does.
 pub type DriverRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockDriverID>>;
 
+/// Scheduler-level reader-writer spinlock.
+///
+/// As [`SchedulerSpinlock`], a spinning lock: see [`level::Scheduler`].
+pub type SchedulerRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockSchedulerID>>;
+
 /// Thread-level reader-writer spinlock.
 ///
 /// As [`ThreadSpinlock`], a spinning lock: see [`level::Thread`].
@@ -237,7 +255,8 @@ mod test {
     };
 
     use crate::kernel::locking::{
-        CanAcquire, DriverLevel, EpilogueLevel, PreviousToken, RootToken, SyscallLevel, ThreadLevel,
+        CanAcquire, DriverLevel, EpilogueLevel, PreviousToken, RootToken, SchedulerLevel,
+        SyscallLevel, ThreadLevel,
     };
 
     use super::*;
@@ -716,6 +735,48 @@ mod test {
         let token = memory_management_guard.release(token);
 
         driver_level.leave(token);
+    }
+
+    /// The `Scheduler` level sits below `Driver`: a driver — or anything else
+    /// above it — may take the scheduler's lock, and the scheduler may take a
+    /// thread lock while it holds its own.
+    #[test]
+    fn usage_scheduler_level() {
+        let root_token = unsafe { RootToken::forge() };
+
+        let (driver_level, token) = DriverLevel::enter(root_token);
+
+        let scheduler = SchedulerSpinlock::new(Spinlock::new(), 0);
+        let thread = ThreadRWSpinlock::new(RWSpinlock::new(), 0);
+
+        let (scheduler_guard, token) = scheduler.acquire(token);
+        let (thread_guard, token) = thread.acquire_shared(token);
+
+        let token = thread_guard.release(token);
+        let token = scheduler_guard.release(token);
+
+        driver_level.leave(token);
+    }
+
+    /// A context entering at the `Scheduler` level reaches the levels below it
+    /// — a thread's state and the memory levels underneath — and, as with
+    /// every other level, not its own.
+    #[test]
+    fn usage_scheduler_entry_level() {
+        let root_token = unsafe { RootToken::forge() };
+
+        let (scheduler_level, token) = SchedulerLevel::enter(root_token);
+
+        let thread = ThreadSpinlock::new(Spinlock::new(), 0);
+        let memory = MemorySpinlock::new(Spinlock::new(), 0);
+
+        let (thread_guard, token) = thread.acquire(token);
+        let (memory_guard, token) = memory.acquire(token);
+
+        let token = memory_guard.release(token);
+        let token = thread_guard.release(token);
+
+        scheduler_level.leave(token);
     }
 
     /// The `Thread` level sits below the scheduler: a driver — or anything

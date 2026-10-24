@@ -34,7 +34,7 @@ use crate::{
 };
 
 /// One element, together with its place in the chain.
-struct Node<T> {
+pub struct Node<T> {
     /// Towards the head, `None` for the head itself.
     prev: Link<T>,
     /// Towards the tail, `None` for the tail itself.
@@ -42,6 +42,12 @@ struct Node<T> {
     /// The element.
     data: T,
 }
+
+// SAFETY: a node is only ever reached through the list that owns it, and its
+// links point into that same list, so a node goes wherever its list goes and
+// sending one follows `T`. This is what lets a node-sized allocator, such as a
+// `Cache<Node<T>>`, be sent and shared like the list it serves.
+unsafe impl<T: Send> Send for Node<T> {}
 
 /// A pointer to a node, or the end of the chain.
 type Link<T> = Option<NonNull<Node<T>>>;

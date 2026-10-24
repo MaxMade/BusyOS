@@ -700,6 +700,32 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
                 Ok((WriteGuard { lock: self }, token))
             }
 
+            /// Exclusive access to a lock another context acquired and
+            /// handed over, without acquiring it again.
+            ///
+            /// For a lock held across a context switch: the thread that took
+            /// it is suspended before it can release it, and the thread that
+            /// runs next takes the hold over. The result is the `(guard,
+            /// token)` pair of [`acquire`](Lock::acquire), released the same
+            /// way.
+            ///
+            /// # Safety
+            ///
+            /// The lock must be held exclusively by a context that will never
+            /// release it itself, and each such hold may be adopted only
+            /// once.
+            pub unsafe fn adopt<From>(
+                &self,
+                _token: From,
+            ) -> (WriteGuard<'_, T, L>, Token<L::Id, From, Exclusive>)
+            where
+                From: CanAcquire<<L::Id as LockId>::Level>,
+            {
+                // SAFETY: per the caller's promise the lock is held, and the
+                // hold is now this caller's alone.
+                (WriteGuard { lock: self }, unsafe { Token::forge() })
+            }
+
             /// Shared access. The nested-hold count starts at zero.
             ///
             /// Returns the data guard and the target-level token as a pair.

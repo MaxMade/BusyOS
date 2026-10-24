@@ -158,6 +158,33 @@ impl Drop for DriverLevel {
     }
 }
 
+#[lock_id(Scheduler)]
+pub struct SchedulerLevelID;
+
+pub struct SchedulerLevel;
+
+impl SchedulerLevel {
+    pub fn enter(root_token: RootToken) -> (Self, Token<SchedulerLevelID, RootToken, Shared>) {
+        core::mem::forget(root_token);
+
+        let token = unsafe { Token::forge() };
+        (Self, token)
+    }
+
+    pub fn leave(self, token: Token<SchedulerLevelID, RootToken, Shared>) {
+        core::mem::forget(self);
+        core::mem::forget(token);
+    }
+}
+
+impl Drop for SchedulerLevel {
+    fn drop(&mut self) {
+        panic!(
+            "Scheduler level must never be left implicitly! Use SchedulerLevel::leave(...) instead!"
+        );
+    }
+}
+
 #[lock_id(Thread)]
 pub struct ThreadLevelID;
 

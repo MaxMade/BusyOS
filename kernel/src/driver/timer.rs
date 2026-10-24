@@ -179,7 +179,7 @@ impl IRQCapable for TimerDriver {
     /// Forwards to the concrete timer, see [`IRQCapable::prologue`].
     fn prologue<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
     where
-        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
     {
         match self {
             #[cfg(target_arch = "x86_64")]
@@ -190,7 +190,7 @@ impl IRQCapable for TimerDriver {
     /// Forwards to the concrete timer, see [`IRQCapable::epilogue`].
     fn epilogue<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
     where
-        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
     {
         match self {
             #[cfg(target_arch = "x86_64")]

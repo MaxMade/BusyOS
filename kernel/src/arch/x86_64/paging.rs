@@ -15,8 +15,20 @@ use crate::{
     kernel::{
         bootinfo::Bootinfo,
         locking::{CanAcquire, PreviousToken, level},
+        ticketlock::{MemoryManagementTicketlock, Ticketlock},
     },
+    mem::page_frames::EarlyPageFrames,
 };
+
+/// The kernel's page tables, once the boot core has built them with
+/// [`Paging::kernel_mapping`] and activated them, and `None` before.
+///
+/// Every core runs on them: the other cores load the boot core's `CR3` while
+/// they come up. They are kept for good, and never destroyed, so that nothing
+/// ever drops them, which [`Paging`] does not allow. Their frames come from
+/// [`EarlyPageFrames`], which is why that is their allocator type.
+pub static KERNEL_PAGING: MemoryManagementTicketlock<Option<Paging<EarlyPageFrames>>> =
+    MemoryManagementTicketlock::new(Ticketlock::new(), None);
 
 /// Number of bits to shift a page frame number to obtain a physical address
 /// for a regular (4 KiB) page.

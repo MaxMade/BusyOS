@@ -11,6 +11,9 @@ use crate::kernel::prologue_lock::PrologueLock;
 #[lock_id(Driver)]
 pub struct TicketlockDriverID;
 
+#[lock_id(Scheduler)]
+pub struct TicketlockSchedulerID;
+
 #[lock_id(Thread)]
 pub struct TicketlockThreadID;
 
@@ -93,6 +96,13 @@ impl<Id: LockId> HierarchicalLock for Ticketlock<Id> {
 /// not sleep: every waiter spins for as long as it does.
 pub type DriverTicketlock<T> = Lock<T, Ticketlock<TicketlockDriverID>>;
 
+/// Scheduler-level ticketlock.
+///
+/// [`level::Scheduler`] is the boundary between blocking and spinning locks:
+/// sleeping *is* acquiring this level, so a hold may not sleep, and the
+/// scheduler may take a thread lock while it holds this one.
+pub type SchedulerTicketlock<T> = Lock<T, Ticketlock<TicketlockSchedulerID>>;
+
 /// Thread-level ticketlock.
 ///
 /// [`level::Thread`] is below the scheduler, so this is a spinning lock in
@@ -109,6 +119,9 @@ pub type PrologueTicketlock<T> = PrologueLock<T, Ticketlock<TicketlockPrologueID
 
 #[lock_id(Driver)]
 pub struct RWTicketlockDriverID;
+
+#[lock_id(Scheduler)]
+pub struct RWTicketlockSchedulerID;
 
 #[lock_id(Thread)]
 pub struct RWTicketlockThreadID;
@@ -290,6 +303,11 @@ impl<Id: LockId> HierarchicalLock for RWTicketlock<Id> {
 /// yet, so this spinning one stands in. Until it is replaced, a hold must
 /// not sleep: every waiter spins for as long as it does.
 pub type DriverRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockDriverID>>;
+
+/// Scheduler-level reader-writer ticketlock.
+///
+/// As [`SchedulerTicketlock`], a spinning lock: see [`level::Scheduler`].
+pub type SchedulerRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockSchedulerID>>;
 
 /// Thread-level reader-writer ticketlock.
 ///
@@ -769,6 +787,26 @@ mod test {
         let token = driver_guard.release(token);
 
         epilogue_level.leave(token);
+    }
+
+    /// The `Scheduler` level sits below `Driver`, and a ticketlock is
+    /// available at it like at the levels below.
+    #[test]
+    fn usage_scheduler_level() {
+        let root_token = unsafe { RootToken::forge() };
+
+        let (driver_level, token) = DriverLevel::enter(root_token);
+
+        let scheduler = SchedulerTicketlock::new(Ticketlock::new(), 0);
+        let thread = ThreadRWTicketlock::new(RWTicketlock::new(), 0);
+
+        let (scheduler_guard, token) = scheduler.acquire(token);
+        let (thread_guard, token) = thread.acquire(token);
+
+        let token = thread_guard.release(token);
+        let token = scheduler_guard.release(token);
+
+        driver_level.leave(token);
     }
 
     /// The `Thread` level sits below the scheduler, and a ticketlock is

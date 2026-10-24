@@ -73,12 +73,13 @@ pub trait IRQCapable: Module {
     ///
     /// # Token
     ///
-    /// The `token` is consumed and returned in both arms. A prologue holds
-    /// nothing on entry and has to reach the `Epilogue` level itself to
-    /// request its epilogue, which is what the bound asks for.
+    /// The `token` is consumed and returned in both arms. A prologue runs in
+    /// interrupt context, with interrupts masked, on top of whatever it
+    /// interrupted, so it may only take locks at the `Prologue` level, which
+    /// is what the bound asks for.
     fn prologue<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
     where
-        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken;
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken;
 
     /// The deferred half, run once a prologue has asked for it.
     ///
@@ -90,7 +91,7 @@ pub trait IRQCapable: Module {
     /// The `token` is consumed and returned in both arms.
     fn epilogue<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
     where
-        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken;
+        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken;
 }
 
 /// A handle on a driver that owns interrupt vectors, as the
@@ -195,7 +196,7 @@ impl IRQCapable for IRQCapableDriver {
     /// The `token` is consumed and returned in both arms.
     fn prologue<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
     where
-        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
     {
         let _ = token;
         match self {
@@ -211,7 +212,7 @@ impl IRQCapable for IRQCapableDriver {
     /// The `token` is consumed and returned in both arms.
     fn epilogue<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
     where
-        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
     {
         let _ = token;
         match self {

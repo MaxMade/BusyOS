@@ -1,7 +1,9 @@
 use crate::arch::generic::paging::VirtualAddress;
 use crate::core_local;
+use crate::kernel::arc::Arc;
 use crate::kernel::bitset::{self, BitSet};
 use crate::kernel::locking::PreviousToken;
+use crate::sched::thread::{Thread, ThreadEntry};
 use core::ffi::c_void;
 use core::fmt::{Debug, Display};
 use core::fmt::{LowerHex, UpperHex};
@@ -95,6 +97,50 @@ pub trait CPU {
     unsafe fn raw_enable_interrupts();
 
     unsafe fn raw_disable_interrupts();
+
+    /// Enables interrupts and waits for the next one, returning once it has
+    /// been handled.
+    ///
+    /// What an idle core does instead of spinning.
+    ///
+    /// # Safety
+    ///
+    /// As for [`raw_enable_interrupts`](CPU::raw_enable_interrupts):
+    /// interrupt handling must be set up, and enabling interrupts must not
+    /// break an enclosing critical section.
+    unsafe fn idle();
+
+    /// Suspends the running thread `prev` and resumes `next` on its own kernel
+    /// stack.
+    ///
+    /// The call returns once some other thread switches back to `prev`, and
+    /// what it returns then is *that* thread — the one suspended to resume
+    /// `prev` — not the `prev` passed in. The handle on it is the one its
+    /// caller gave up, so the caller here decides where it goes next, e.g.
+    /// back into the run queue.
+    ///
+    /// Only the callee-saved registers survive the switch. `next` must have
+    /// been suspended by this function or prepared to look as if it had been.
+    fn context_switch(prev: Arc<Thread>, next: Arc<Thread>) -> Arc<Thread>;
+
+    /// Top of the calling core's boot stack, the one the core started out
+    /// on.
+    ///
+    /// [`KERNEL_STACK_SIZE`](CPU::KERNEL_STACK_SIZE) bytes long. The boot
+    /// context keeps running on it as a thread of its own until it hands the
+    /// core over to the threads, see
+    /// [`schedule`](crate::sched::scheduler::schedule).
+    fn boot_stack_top() -> VirtualAddress<c_void>;
+
+    /// Sets a new `thread` up so that the first switch to it runs
+    /// `entry(arg, ..)`, see [`ThreadEntry`].
+    ///
+    /// Lays the thread's kernel stack out as if [`context_switch`] had
+    /// suspended the thread, but returning into entry code of its own, which
+    /// finishes that first switch for the scheduler before it calls `entry`.
+    ///
+    /// [`context_switch`]: CPU::context_switch
+    fn context_prepare(thread: &mut Thread, entry: ThreadEntry, arg: usize);
 
     /// Records the return addresses of the calling code's stack frames,
     /// innermost first, into `call_stack`, and returns the part it filled.

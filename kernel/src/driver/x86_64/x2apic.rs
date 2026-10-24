@@ -53,6 +53,7 @@ use crate::{
         },
         time::{MilliSeconds, NanoSeconds, TimeUnit},
     },
+    sched::scheduler::{Scheduler, SchedulerDriver},
     user::errno::Errno,
 };
 
@@ -589,6 +590,14 @@ pub struct X2Apic {
     ///
     /// Zero until the timer has been set up.
     period_ticks: AtomicUsize,
+
+    /// The vector the timer raises on every core.
+    ///
+    /// Allocated once, by [`init`](Module::init) on the boot core, and
+    /// written into each core's local vector table by
+    /// [`IRQCapable::enable_irqs`], since every core has a timer entry of its
+    /// own.
+    timer_vector: InterruptVector,
 }
 
 impl Module for X2Apic {
@@ -734,6 +743,7 @@ impl Module for X2Apic {
             ticks_per_ms,
             total_ticks: AtomicUsize::new(0),
             period_ticks: AtomicUsize::new(0),
+            timer_vector: vector,
         };
         let driver = match Arc::try_new(driver, token) {
             Ok((driver, t)) => {
@@ -819,17 +829,19 @@ impl Module for X2Apic {
 }
 
 impl IRQCapable for X2Apic {
-    /// Unmasks the timer's entry in the local vector table, see
-    /// [`IRQCapable::enable_irqs`].
+    /// Unmasks the timer's entry in the calling core's local vector table,
+    /// see [`IRQCapable::enable_irqs`].
     ///
-    /// Only the mask bit changes. The vector and the timer mode are read
-    /// back and written as they were.
+    /// The entry gets the timer's vector as well: only the boot core's has it
+    /// from [`init`](Module::init), and every other core's still holds its
+    /// reset value. The timer mode is read back and written as it was.
     fn enable_irqs<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
         // XXX: x2APIC is local; thus, no synchronisation
         let mut lvt_timer = unsafe { X2ApicLVTTimer::read() };
+        lvt_timer.set_vector(self.timer_vector.into_raw());
         lvt_timer.set_masked(false);
         unsafe { lvt_timer.write() };
 
@@ -865,12 +877,14 @@ impl IRQCapable for X2Apic {
         Ok((!masked, token))
     }
 
-    /// Nothing to do yet, see [`IRQCapable::prologue`].
+    /// Counts the expired period on the boot core, see
+    /// [`IRQCapable::prologue`].
     ///
-    /// Always reports that no epilogue is needed.
+    /// Always asks for the epilogue, which moves the core on to the next
+    /// thread.
     fn prologue<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
     where
-        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
     {
         let cpuid = CPUID.with(|cpuid| *cpuid);
         if cpuid == BOOT_CPUID {
@@ -882,16 +896,26 @@ impl IRQCapable for X2Apic {
             self.total_ticks.fetch_add(period, AtomicOrdering::Release);
         }
 
-        Ok((false, token))
+        Ok((true, token))
     }
 
-    /// Nothing to do yet, see [`IRQCapable::epilogue`].
+    /// Ends the running thread's turn, see [`IRQCapable::epilogue`].
+    ///
+    /// Switches to the next runnable thread, if there is one, and returns
+    /// once the interrupted thread runs again. Runs on the epilogue level, as
+    /// every switch has to, and only when the interrupted code was not on it
+    /// already: a thread on the level is never preempted, its tick's epilogue
+    /// is deferred until it leaves the level.
+    ///
+    /// A core without a scheduler yet keeps running what it ran.
     fn epilogue<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
     where
-        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
     {
-        // Nothing to do yet...
-        Ok(token)
+        match SchedulerDriver::get(token) {
+            (Some(scheduler), token) => scheduler.schedule(token),
+            (None, token) => Ok(token),
+        }
     }
 }
 
