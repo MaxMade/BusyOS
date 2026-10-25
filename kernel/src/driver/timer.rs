@@ -21,10 +21,10 @@ use crate::{
     kernel::{
         linked_list::LinkedList,
         locking::{
-            CanAcquire, DriverLevelID, EpilogueLevelID, LockId, PreviousToken, PrologueLevelID,
-            ReadGuard, Shared, Token,
+            CanAcquire, DriverLevelID, EpilogueLevelID, Exclusive, LockId, PreviousToken,
+            PrologueLevelID, Token,
+            mutex::{DriverMutex, MutexDriverID, MutexGuard},
         },
-        ticketlock::{DriverRWTicketlock, RWTicketlock, RWTicketlockDriverID},
         time::NanoSeconds,
     },
     user::errno::{Errno, ToErrno},
@@ -270,7 +270,7 @@ impl Timers {
 
     /// Walks every registered timer, in the order they registered.
     ///
-    /// The returned [`TimersIter`] holds [`TIMERS`] shared for as long as it
+    /// The returned [`TimersIter`] holds [`TIMERS`] for as long as it
     /// lives, so no timer can register in the meantime, and yields a clone
     /// of each handle rather than a reference into the list.
     ///
@@ -283,7 +283,7 @@ impl Timers {
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
-        let (timers, token) = TIMERS.acquire_shared(token);
+        let (timers, token) = TIMERS.acquire(token);
 
         TimersIter {
             timers,
@@ -306,7 +306,7 @@ impl Timers {
     {
         // TODO(@MaxMade): Pick the timer named by the build configuration or
         // the kernel command line, once either exists.
-        let (timers, token) = TIMERS.acquire_shared(token);
+        let (timers, token) = TIMERS.acquire(token);
         let driver = timers.0.front().cloned();
 
         (driver, timers.release(token))
@@ -321,8 +321,8 @@ pub struct TimersIter<From>
 where
     From: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
 {
-    timers: ReadGuard<'static, Timers, RWTicketlock<RWTicketlockDriverID>>,
-    token: Token<RWTicketlockDriverID, From, Shared>,
+    timers: MutexGuard<'static, Timers, MutexDriverID>,
+    token: Token<MutexDriverID, From, Exclusive>,
     next: usize,
 }
 
@@ -353,5 +353,4 @@ where
 }
 
 /// The one list of registered timers.
-pub static TIMERS: DriverRWTicketlock<Timers> =
-    DriverRWTicketlock::new(RWTicketlock::new(), Timers(LinkedList::new()));
+pub static TIMERS: DriverMutex<Timers> = DriverMutex::new(Timers(LinkedList::new()));

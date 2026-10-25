@@ -1331,7 +1331,7 @@ impl InterruptController for X2Apic {
     /// is the one being handled.
     fn acknowledge<Token>(&self, _: InterruptVector, token: Token) -> Result<Token, (Errno, Token)>
     where
-        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
     {
         // XXX: x2APIC is local; thus, no synchronisation
         unsafe { X2ApicEOI::new().write() };

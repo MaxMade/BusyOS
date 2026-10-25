@@ -13,7 +13,7 @@ use crate::{
     },
     kernel::{
         bitset::{self, BitSet},
-        locking::{CanAcquire, EpilogueLevelID, LockId, PreviousToken, RootToken, SyscallLevel},
+        locking::{CanAcquire, EpilogueLevelID, Init, LockId, PreviousToken, RootToken},
         printk::LogLevel,
         spsc::SPSC,
     },
@@ -48,6 +48,18 @@ core_local! {
     static ON_EPILOGUE_LEVEL: bool = false;
     static PENDING_INTERRUPTS: BitSet<InterruptVector, { bitset::words(<InterruptVector as GenericInterruptVector>::MAX_NUM) }> = BitSet::empty();
     static EPILOGUE_QUEUE: SPSC<(IRQCapableDriver, InterruptVector), { <InterruptVector as GenericInterruptVector>::MAX_NUM }> = SPSC::new();
+}
+
+impl Epilogue<Init<RootToken>> {
+    /// Enters the epilogue level from start-up, as [`enter`](Epilogue::enter)
+    /// does, with the core's root token wrapped as an [`Init`] one.
+    ///
+    /// The core does not run threads yet, so nothing may sleep: every token
+    /// acquired on top of it spins on a
+    /// [`Mutex`](crate::kernel::locking::mutex::Mutex) instead.
+    pub fn enter_init(root_token: RootToken) -> Self {
+        Self::enter_with(Init(root_token), None)
+    }
 }
 
 impl<Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken> Epilogue<Token> {
@@ -262,9 +274,9 @@ pub fn handler(vector: InterruptVector, _stack_frame: *mut InterruptStackFrame) 
         unsafe { CPU::halt() }
     }
 
-    // Enter fake system level
-    let root = unsafe { RootToken::forge() };
-    let (level, mut token) = SyscallLevel::enter(root);
+    // An interrupt starts out holding nothing, and enters the epilogue level,
+    // the top of the hierarchy, from its root token below.
+    let mut token = unsafe { RootToken::forge() };
 
     // Get driver for interrupt/exception
     let driver = match InterruptVectorTable::driver(vector, token) {
@@ -320,7 +332,5 @@ pub fn handler(vector: InterruptVector, _stack_frame: *mut InterruptStackFrame) 
     if epilogue_required {
         epilogue.execute_or_defer(&driver);
     }
-    let token = epilogue.leave();
-
-    level.leave(token);
+    let _token = epilogue.leave();
 }

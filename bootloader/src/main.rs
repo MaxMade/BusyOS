@@ -9,8 +9,7 @@ pub mod paging;
 
 extern crate alloc;
 
-use busyos::kernel::locking::RootToken;
-use busyos::kernel::locking::SyscallLevel;
+use busyos::kernel::locking::{Init, RootToken};
 use uefi::prelude::*;
 use uefi::println;
 
@@ -28,9 +27,10 @@ fn main() -> Status {
     println!("Welcome to BUSYOS!");
     println!("Starting BUSYOS UEFI Bootloader...");
 
-    // Simulate system-call entry to get top-level token
-    let root_token = unsafe { RootToken::forge() };
-    let (syscall_level, token) = SyscallLevel::enter(root_token);
+    // The bootloader runs before anything schedules, so it holds an init
+    // token, which reaches every level, the epilogue level at the top
+    // included.
+    let token = Init(unsafe { RootToken::forge() });
 
     // Try to load BUSYOS kernel ELF
     let handle = uefi::boot::image_handle();
@@ -54,8 +54,8 @@ fn main() -> Status {
     let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
     memory_map::parse(memory_map, bootinfo);
 
-    // Simulate system-call exit
-    syscall_level.leave(token);
+    // Done with the locking hierarchy.
+    drop(token);
 
     // Perform handover
     // TODO(@MaxMade): Currently only the boot processor is started...

@@ -2,15 +2,13 @@
 
 use kernel_derive::{Locking, lock_id};
 
+pub mod mutex;
+
 /// Base lock level hierarchy
 #[derive(Locking)]
 pub enum Level {
-    // System initialisation, from the bootstrap stub until the first thread
-    // is scheduled. The top of the hierarchy, so init code may acquire
-    // anything; no lock of its own lives here, and nothing can acquire it.
-    Init,
-    Syscall,
-    // Top half of interrupt handling.
+    // Top half of interrupt handling, and the top of the hierarchy: kernel
+    // code runs on it, see `Epilogue`, and only a `RootToken` enters it.
     Epilogue,
     // Device drivers, e.g. a driver's own state or the device it talks to.
     //
@@ -20,10 +18,7 @@ pub enum Level {
     // ordinary case. Per the note below, that makes a lock at this level a
     // blocking one.
     //
-    // TODO(@MaxMade): no blocking lock exists yet, so the `Driver` locks in
-    // `spinlock` and `ticketlock` stand in for one. Until they are replaced, a
-    // hold at this level must not sleep after all: every waiter spins for as
-    // long as it does.
+    // The lock at this level is `DriverMutex`, see `locking::mutex`.
     Driver,
     // The scheduler's own lock, and the boundary between blocking and
     // spinning locks.
@@ -52,58 +47,6 @@ pub enum Level {
     Memory,
     // Bottom half of interrupt handling.
     Prologue,
-}
-
-#[lock_id(Init)]
-pub struct InitLevelID;
-
-pub struct InitLevel;
-
-impl InitLevel {
-    pub fn enter(root_token: RootToken) -> (Self, Token<InitLevelID, RootToken, Shared>) {
-        core::mem::forget(root_token);
-
-        let token = unsafe { Token::forge() };
-        (Self, token)
-    }
-
-    pub fn leave(self, token: Token<InitLevelID, RootToken, Shared>) {
-        core::mem::forget(self);
-        core::mem::forget(token);
-    }
-}
-
-impl Drop for InitLevel {
-    fn drop(&mut self) {
-        panic!("Init level must never be left implicitly! Use InitLevel::leave(...) instead!");
-    }
-}
-
-#[lock_id(Syscall)]
-pub struct SyscallLevelID;
-
-pub struct SyscallLevel;
-
-impl SyscallLevel {
-    pub fn enter(root_token: RootToken) -> (Self, Token<SyscallLevelID, RootToken, Shared>) {
-        core::mem::forget(root_token);
-
-        let token = unsafe { Token::forge() };
-        (Self, token)
-    }
-
-    pub fn leave(self, token: Token<SyscallLevelID, RootToken, Shared>) {
-        core::mem::forget(self);
-        core::mem::forget(token);
-    }
-}
-
-impl Drop for SyscallLevel {
-    fn drop(&mut self) {
-        panic!(
-            "Syscall level must never be left implicitly! Use SyscallLevel::leave(...) instead!"
-        );
-    }
 }
 
 #[lock_id(Epilogue)]

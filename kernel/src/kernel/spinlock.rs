@@ -8,9 +8,6 @@ use kernel_derive::lock_id;
 use crate::kernel::locking::{HierarchicalLock, Lock, LockId, level};
 use crate::kernel::prologue_lock::PrologueLock;
 
-#[lock_id(Driver)]
-pub struct SpinlockDriverID;
-
 #[lock_id(Scheduler)]
 pub struct SpinlockSchedulerID;
 
@@ -81,14 +78,6 @@ impl<Id: LockId> HierarchicalLock for Spinlock<Id> {
     }
 }
 
-/// Driver-level spinlock.
-///
-/// TODO(@MaxMade): a lock at [`level::Driver`] is meant to be a blocking
-/// lock — a driver sleeps while it waits for its device — and none exists
-/// yet, so this spinning one stands in. Until it is replaced, a hold must
-/// not sleep: every waiter spins for as long as it does.
-pub type DriverSpinlock<T> = Lock<T, Spinlock<SpinlockDriverID>>;
-
 /// Scheduler-level spinlock.
 ///
 /// [`level::Scheduler`] is the boundary between blocking and spinning locks:
@@ -109,9 +98,6 @@ pub type MemorySpinlock<T> = Lock<T, Spinlock<SpinlockMemoryID>>;
 
 /// Prologue-level spinlock. Masks interrupts for the duration of the hold.
 pub type PrologueSpinlock<T> = PrologueLock<T, Spinlock<SpinlockPrologueID>>;
-
-#[lock_id(Driver)]
-pub struct RWSpinlockDriverID;
 
 #[lock_id(Scheduler)]
 pub struct RWSpinlockSchedulerID;
@@ -221,14 +207,6 @@ impl<Id: LockId> HierarchicalLock for RWSpinlock<Id> {
     }
 }
 
-/// Driver-level reader-writer spinlock.
-///
-/// TODO(@MaxMade): a lock at [`level::Driver`] is meant to be a blocking
-/// lock — a driver sleeps while it waits for its device — and none exists
-/// yet, so this spinning one stands in. Until it is replaced, a hold must
-/// not sleep: every waiter spins for as long as it does.
-pub type DriverRWSpinlock<T> = Lock<T, RWSpinlock<RWSpinlockDriverID>>;
-
 /// Scheduler-level reader-writer spinlock.
 ///
 /// As [`SchedulerSpinlock`], a spinning lock: see [`level::Scheduler`].
@@ -256,7 +234,7 @@ mod test {
 
     use crate::kernel::locking::{
         CanAcquire, DriverLevel, EpilogueLevel, PreviousToken, RootToken, SchedulerLevel,
-        SyscallLevel, ThreadLevel,
+        ThreadLevel,
     };
 
     use super::*;
@@ -267,7 +245,7 @@ mod test {
     fn usage_exclusive() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let epilogue = MemoryManagementSpinlock::new(Spinlock::new(), 0);
 
@@ -281,14 +259,14 @@ mod test {
 
         let token = epilogue_guard.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     #[test]
     fn usage_shared() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let epilogue = MemoryManagementRWSpinlock::new(RWSpinlock::new(), 0);
 
@@ -306,7 +284,7 @@ mod test {
 
         let token = epilogue_guard_0.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     fn do_memory_work<From>(token: From) -> From
@@ -323,7 +301,7 @@ mod test {
     fn usage_exclusive_subroutine() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let epilogue = MemoryManagementSpinlock::new(Spinlock::new(), 0);
 
@@ -333,14 +311,14 @@ mod test {
 
         let token = epilogue_guard.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     #[test]
     fn usage_shared_subroutine() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let epilogue = MemoryManagementRWSpinlock::new(RWSpinlock::new(), 0);
 
@@ -350,7 +328,7 @@ mod test {
 
         let token = epilogue_guard.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     #[test]
@@ -458,7 +436,7 @@ mod test {
     fn usage_try_exclusive() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let lock = MemoryManagementSpinlock::new(Spinlock::new(), 0);
 
@@ -472,7 +450,7 @@ mod test {
             .unwrap_or_else(|_| panic!("lock was released"));
         let token = guard.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     /// As `usage_try_exclusive`, in shared mode: the token handed out still
@@ -481,7 +459,7 @@ mod test {
     fn usage_try_shared() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let shared = MemoryManagementRWSpinlock::new(RWSpinlock::new(), 0);
         let memory = MemoryRWSpinlock::new(RWSpinlock::new(), 0);
@@ -500,7 +478,7 @@ mod test {
         let token = nested_guard.release(token);
         let token = shared_guard.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     /// Runs `attempt` on this thread while another thread holds `lock`.
@@ -693,27 +671,6 @@ mod test {
 
         let mut counter = Arc::into_inner(counter).unwrap();
         assert!(*counter.get_mut() == acquired);
-    }
-
-    /// The `Driver` level sits between `Epilogue` and `MemoryManagement`: an
-    /// epilogue may take a driver lock, and a driver lock may be held while
-    /// descending to the memory levels below.
-    #[test]
-    fn usage_driver_level() {
-        let root_token = unsafe { RootToken::forge() };
-
-        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
-
-        let driver = DriverSpinlock::new(Spinlock::new(), 0);
-        let memory_management = MemoryManagementSpinlock::new(Spinlock::new(), 0);
-
-        let (driver_guard, token) = driver.acquire(token);
-        let (memory_management_guard, token) = memory_management.acquire(token);
-
-        let token = memory_management_guard.release(token);
-        let token = driver_guard.release(token);
-
-        epilogue_level.leave(token);
     }
 
     /// A context entering at the `Driver` level holds it, so it reaches

@@ -352,16 +352,23 @@ pub trait InterruptController: Module {
     /// acknowledging means, from a PIC's end-of-interrupt command to an APIC's
     /// write to its own register.
     ///
+    /// Runs in the interrupt handler itself, with interrupts disabled and
+    /// before the epilogue level is entered, see
+    /// [`handler`](crate::kernel::handler::handler).
+    ///
     /// # Token
     ///
-    /// The `token` is consumed and returned in both arms.
+    /// The `token` reaches the `Prologue` level only, as a prologue's does:
+    /// nothing above it may be taken here, least of all a mutex, which could
+    /// block the interrupted thread or switch threads off the epilogue level.
+    /// It is consumed and returned in both arms.
     fn acknowledge<Token>(
         &self,
         vector: InterruptVector,
         token: Token,
     ) -> Result<Token, (Errno, Token)>
     where
-        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken;
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken;
 
     /// Tells the driver in charge of `vector` to stop raising it.
     ///
@@ -505,7 +512,7 @@ impl InterruptController for InterruptControllerDriver {
         token: Token,
     ) -> Result<Token, (Errno, Token)>
     where
-        Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
     {
         match self {
             #[cfg(target_arch = "x86_64")]

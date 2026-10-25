@@ -16,11 +16,7 @@ use crate::driver::x86_64::x2apic::X2Apic;
 use crate::kernel::bootinfo::BOOTINFO;
 use crate::kernel::core_local::{PerCPU, init_block_base};
 use crate::kernel::handler::Epilogue;
-use crate::kernel::locking::InitLevel;
-use crate::kernel::locking::InitLevelID;
-use crate::kernel::locking::RootToken;
-use crate::kernel::locking::Shared;
-use crate::kernel::locking::Token;
+use crate::kernel::locking::{Init, RootToken};
 use crate::kernel::printk;
 use crate::kernel::printk::LogLevel;
 use crate::kernel::time::MilliSeconds;
@@ -130,18 +126,16 @@ static RAW_CPUID: AtomicUsize = AtomicUsize::new(0);
 #[unsafe(no_mangle)]
 pub extern "C" fn start() -> i32 {
     let root_token = unsafe { RootToken::forge() };
-    let (init_level, token) = InitLevel::enter(root_token);
 
-    // Start-up runs on the epilogue level: an interrupt only runs its
-    // prologue, and its epilogue waits until the level is left. `schedule`
-    // hands the level over to the core's first thread, and the idle thread
-    // leaves it, once the core can schedule.
-    let mut epilogue = Epilogue::enter(token);
+    // Start-up runs on the epilogue level, the top of the hierarchy: an
+    // interrupt only runs its prologue, and its epilogue waits until the
+    // level is left. `schedule` hands the level over to the core's first
+    // thread, and the idle thread leaves it, once the core can schedule. The
+    // boot context never leaves it: it ends in `schedule`, which never
+    // returns. Its token is an init one, so that a mutex spins rather than
+    // sleeps, see `InitToken`.
+    let mut epilogue = Epilogue::enter_init(root_token);
     epilogue.execute(|token| ((), init_boot_core(token)));
-
-    // The `Init` level is never left: the boot context ends in `schedule`,
-    // which never returns, with its token on the epilogue level.
-    core::mem::forget(init_level);
 
     crate::sched::scheduler::schedule(epilogue)
 }
@@ -165,7 +159,7 @@ fn init_boot_core(token: InitToken) -> InitToken {
     }
 
     // Setup kernel mapping
-    let (paging, t): (Paging<EarlyPageFrames>, Token<_, _, _>) =
+    let (paging, t): (Paging<EarlyPageFrames>, InitToken) =
         match Paging::kernel_mapping(bootinfo, token) {
             Ok((paging, t)) => (paging, t),
             Err((error, _)) => panic!("Unable to setup kernel mapping: {}", error),
@@ -208,8 +202,13 @@ fn init_boot_core(token: InitToken) -> InitToken {
     crate::arch::x86_64::smp::start_other_cores(token)
 }
 
-/// The token every core starts out with, at the `Init` level.
-type InitToken = Token<InitLevelID, RootToken, Shared>;
+/// The token every core starts out with: its root token as an init one, which
+/// the epilogue level, the top of the hierarchy, hands to start-up, see
+/// `start`.
+///
+/// The core does not run threads before `schedule`, so nothing may sleep: a
+/// mutex taken with a token acquired on top of this one spins instead.
+type InitToken = Init<RootToken>;
 
 /// What every core has to set up for itself, the boot core included.
 ///
@@ -302,10 +301,10 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     // SAFETY: this is the core's first Rust code after `__init_gs`, and it
     // holds no token yet.
     let root_token = unsafe { RootToken::forge() };
-    let (init_level, token) = InitLevel::enter(root_token);
 
-    // On the epilogue level, as on the boot core, see `start`.
-    let mut epilogue = Epilogue::enter(token);
+    // On the epilogue level, with an init token, as on the boot core, see
+    // `start`.
+    let mut epilogue = Epilogue::enter_init(root_token);
     epilogue.execute(|token| {
         // SAFETY: the boot core has built the GDT and IDT before starting
         // this core, and this runs once, before the core uses its local APIC.
@@ -317,9 +316,6 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
         // core, so this core arms its own.
         ((), init_timer(token))
     });
-
-    // See `start`.
-    core::mem::forget(init_level);
 
     crate::sched::scheduler::schedule(epilogue)
 }

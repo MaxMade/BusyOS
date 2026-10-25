@@ -158,15 +158,20 @@ pub fn module(input: TokenStream) -> TokenStream {
             use crate::kernel::locking::{CanAcquire,PreviousToken};
 
             let root = unsafe { crate::kernel::locking::RootToken::forge() };
-            let (level, mut token) = crate::kernel::locking::InitLevel::enter(root);
+            let (level, token) = crate::kernel::locking::EpilogueLevel::enter(root);
 
-            token = match <#driver as crate::driver::module::Module>::init(token) {
-                Ok(token) => token,
-                Err((_errno, token)) => {
-                    // TODO(@MaxMade): At least try to log the error...
-                    token
-                }
-            };
+            // Modules come up during start-up, before the core runs threads:
+            // an init token makes a mutex spin rather than sleep.
+            let token = crate::kernel::locking::Init(token);
+
+            let crate::kernel::locking::Init(token) =
+                match <#driver as crate::driver::module::Module>::init(token) {
+                    Ok(token) => token,
+                    Err((_errno, token)) => {
+                        // TODO(@MaxMade): At least try to log the error...
+                        token
+                    }
+                };
 
             level.leave(token);
         }

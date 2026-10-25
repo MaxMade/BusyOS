@@ -8,6 +8,7 @@ use crate::{
         handler::Epilogue,
         locking::{
             CanAcquire, EpilogueLevelID, LockId, PreviousToken, RootToken, SchedulerLevelID,
+            ThreadLevelID,
         },
         ticketlock::{RWTicketlock, SchedulerRWTicketlock},
     },
@@ -114,7 +115,19 @@ fn idle_thread(_: usize, token: RootToken) -> ! {
 /// running thread is in [`CURRENT`] and the idle thread in [`IDLE_THREAD`]
 /// instead.
 pub trait Scheduler {
-    /// Makes `thread` runnable.
+    /// The token of the scheduler's own lock, on top of the caller's `From`,
+    /// as [`try_block`](Scheduler::try_block) hands it to its closure.
+    ///
+    /// Reaches every level below `Scheduler`, so that the closure can lock the
+    /// queue it puts the thread into and allocate for it.
+    type LockedToken<From: PreviousToken>: CanAcquire<<ThreadLevelID as LockId>::Level>
+        + PreviousToken;
+
+    /// Makes `thread` runnable, e.g. to wake it up once it has blocked in
+    /// [`try_block`](Scheduler::try_block).
+    ///
+    /// A thread that is still on its way into a block is only queued once its
+    /// switch away is finished, see [`try_block`](Scheduler::try_block).
     ///
     /// # Errors
     ///
@@ -166,6 +179,33 @@ pub trait Scheduler {
     fn schedule<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<SchedulerLevelID as LockId>::Level> + PreviousToken;
+
+    /// Blocks the running thread if `block` decides so, deciding and blocking
+    /// as one step.
+    ///
+    /// `block` runs under the scheduler's lock, with the running thread and
+    /// the lock's token, and returns whether the thread is to block, along
+    /// with the token. If not, this returns right away. If so, the thread
+    /// stops being runnable and the core switches to the next runnable one,
+    /// or to its idle thread, as in [`schedule`](Scheduler::schedule); this
+    /// returns once the thread has been made runnable again, see
+    /// [`enqueue`](Scheduler::enqueue), and runs again.
+    ///
+    /// The lock is kept from `block` until the switch away is finished, so
+    /// whoever is to wake the thread — `block` typically puts it into a
+    /// waiting queue — can neither miss the decision nor queue the thread
+    /// before it has stopped running.
+    ///
+    /// Must be called on the epilogue level, as
+    /// [`schedule`](Scheduler::schedule), and never by an idle thread.
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned.
+    fn try_block<Token, Block>(&self, token: Token, block: Block) -> Token
+    where
+        Token: CanAcquire<<SchedulerLevelID as LockId>::Level> + PreviousToken,
+        Block: FnOnce(&Arc<Thread>, Self::LockedToken<Token>) -> (bool, Self::LockedToken<Token>);
 
     /// Hands the calling core over from its boot context to the threads, for
     /// good. Never returns.
@@ -275,6 +315,10 @@ impl SchedulerDriver {
 // Every method below matches on the variant and forwards to the concrete
 // scheduler's method, handing `token` along.
 impl Scheduler for SchedulerDriver {
+    /// The round-robin scheduler's, the only one so far. A scheduler added
+    /// as a variant has to hand out the same token type.
+    type LockedToken<From: PreviousToken> = <RoundRobin as Scheduler>::LockedToken<From>;
+
     /// Forwards to the concrete scheduler, see [`Scheduler::enqueue`].
     fn enqueue<Token>(&self, thread: Arc<Thread>, token: Token) -> Result<Token, (Errno, Token)>
     where
@@ -306,6 +350,17 @@ impl Scheduler for SchedulerDriver {
     {
         match self {
             SchedulerDriver::RoundRobin(round_robin) => round_robin.schedule(token),
+        }
+    }
+
+    /// Forwards to the concrete scheduler, see [`Scheduler::try_block`].
+    fn try_block<Token, Block>(&self, token: Token, block: Block) -> Token
+    where
+        Token: CanAcquire<<SchedulerLevelID as LockId>::Level> + PreviousToken,
+        Block: FnOnce(&Arc<Thread>, Self::LockedToken<Token>) -> (bool, Self::LockedToken<Token>),
+    {
+        match self {
+            SchedulerDriver::RoundRobin(round_robin) => round_robin.try_block(token, block),
         }
     }
 

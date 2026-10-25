@@ -55,7 +55,7 @@ impl RoundRobin {
     }
 
     /// Switches this core away from the running thread, which stops running
-    /// as `state` says.
+    /// as `state` says, with the run queue locked as `queue`.
     ///
     /// The next thread is the one at the front of the queue. With the queue
     /// empty, a thread that stays runnable keeps the core, and one that does
@@ -63,7 +63,8 @@ impl RoundRobin {
     ///
     /// The state is set under the run queue's lock, which the switch keeps
     /// until the next thread has finished it, see [`finish_switch`]. Nobody
-    /// sees the thread blocked before its stack pointer is saved.
+    /// sees the thread blocked before its stack pointer is saved. Returns
+    /// once the thread runs again, with the lock released.
     ///
     /// # Panics
     ///
@@ -71,12 +72,14 @@ impl RoundRobin {
     /// thread to fall back to.
     ///
     /// [`finish_switch`]: RoundRobin::finish_switch
-    fn switch_away<From>(&self, state: ThreadState, token: From) -> From
+    fn switch_away<From>(
+        mut queue: WriteGuard<'_, RunQueue, Ticketlock<TicketlockSchedulerID>>,
+        state: ThreadState,
+        token: Token<TicketlockSchedulerID, From, Exclusive>,
+    ) -> From
     where
         From: CanAcquire<<SchedulerLevelID as LockId>::Level> + PreviousToken,
     {
-        let (mut queue, token) = self.0.acquire(token);
-
         let current_is_idle = CURRENT.with(|current| {
             current.set_state(state);
             current.is_idle()
@@ -198,6 +201,8 @@ impl Module for RoundRobin {
 }
 
 impl Scheduler for RoundRobin {
+    type LockedToken<From: PreviousToken> = Token<TicketlockSchedulerID, From, Exclusive>;
+
     fn enqueue<Token>(&self, thread: Arc<Thread>, token: Token) -> Result<Token, (Errno, Token)>
     where
         Token: CanAcquire<<SchedulerLevelID as LockId>::Level> + PreviousToken,
@@ -209,6 +214,10 @@ impl Scheduler for RoundRobin {
                 panic!("Found duplicate entry in scheduler queue: {}", thread.id());
             }
         }
+
+        // A thread that blocked is out of its switch by now: the switch kept
+        // the lock, and only released it once it was finished.
+        thread.set_state(ThreadState::Runnable);
 
         let token = match queue.try_push_back(thread, token) {
             Ok(token) => token,
@@ -258,14 +267,37 @@ impl Scheduler for RoundRobin {
     where
         Token: CanAcquire<<SchedulerLevelID as LockId>::Level> + PreviousToken,
     {
-        Ok(self.switch_away(ThreadState::Runnable, token))
+        let (queue, token) = self.0.acquire(token);
+
+        Ok(Self::switch_away(queue, ThreadState::Runnable, token))
+    }
+
+    fn try_block<Token, Block>(&self, token: Token, block: Block) -> Token
+    where
+        Token: CanAcquire<<SchedulerLevelID as LockId>::Level> + PreviousToken,
+        Block: FnOnce(&Arc<Thread>, Self::LockedToken<Token>) -> (bool, Self::LockedToken<Token>),
+    {
+        let (queue, token) = self.0.acquire(token);
+
+        // `CURRENT` keeps the running thread alive, so this handle is never
+        // the last one and needs no token.
+        let current = CURRENT.with(|current| current.clone());
+        let (blocks, token) = block(&current, token);
+        drop(current);
+
+        match blocks {
+            true => Self::switch_away(queue, ThreadState::Blocked, token),
+            false => queue.release(token),
+        }
     }
 
     fn start<Token>(&self, token: Token) -> !
     where
         Token: CanAcquire<<SchedulerLevelID as LockId>::Level> + PreviousToken,
     {
-        let _ = self.switch_away(ThreadState::Exited, token);
+        let (queue, token) = self.0.acquire(token);
+
+        let _ = Self::switch_away(queue, ThreadState::Exited, token);
 
         panic!("Boot context was switched to again");
     }
