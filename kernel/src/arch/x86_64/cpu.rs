@@ -6,9 +6,12 @@ use crate::arch::generic::paging::VirtualAddress;
 use crate::arch::x86_64::gdt::SegmentSelector;
 use crate::arch::x86_64::paging::{CR2, CR3};
 use crate::arch::x86_64::rflags::RFLAGS;
+use crate::kernel::arc::Arc;
+use crate::sched::thread::{Thread, ThreadEntry, ThreadType};
 use core::arch::asm;
 use core::ffi::c_void;
 use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use core::mem;
 use core::num::TryFromIntError;
 use core::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 
@@ -16,8 +19,10 @@ use core::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 /// chain, so that [`unwind`](crate::arch::generic::cpu::CPU::unwind) knows
 /// where to stop.
 ///
-/// `head.S` puts it into the first frame on each core's boot stack, and
-/// `entry.S` into `%rbp` before calling
+/// `head.S` puts it into the first frame on each core's boot stack,
+/// [`context_prepare`](crate::arch::generic::cpu::CPU::context_prepare) into
+/// the first frame on each new thread's kernel stack, and `entry.S` into
+/// `%rbp` before calling
 /// `__interrupt_handler`, so that a walk from inside an interrupt ends at
 /// the interrupt entry instead of continuing into the code it interrupted.
 ///
@@ -35,6 +40,32 @@ unsafe extern "C" {
     /// storing one return address per frame into the `len` entries at
     /// `call_stack`, and returns how many it stored. See `unwind.S`.
     fn __unwind(call_stack: *mut usize, len: usize) -> usize;
+
+    /// Saves the stack pointer into `prev`, `offset` bytes in, continues on
+    /// the one saved in `next`, and returns in whichever thread that is. See
+    /// `context_switch.S`.
+    ///
+    /// The layout of `Thread` does not matter to the assembly, which only adds
+    /// `offset` to the pointers.
+    #[allow(improper_ctypes)]
+    fn __context_switch(prev: *const Thread, next: *const Thread, offset: usize) -> Switched;
+
+    /// Where a new thread's first switch returns to, see `context_switch.S`.
+    /// Only its address is taken: it is entered through `ret`, never called.
+    fn __thread_trampoline();
+}
+
+/// What [`__context_switch`] returns in the thread it resumes: the arguments
+/// of the call that switched to it.
+///
+/// `#[repr(C)]`, so that it is returned in `%rax:%rdx` as the assembly does.
+#[cfg(all(not(test), not(feature = "library")))]
+#[repr(C)]
+struct Switched {
+    /// The thread that was suspended.
+    prev: *const Thread,
+    /// The thread now running, i.e. the caller itself.
+    next: *const Thread,
 }
 
 #[derive(Debug)]
@@ -214,6 +245,27 @@ impl crate::arch::generic::cpu::CPU for CPU {
         }
     }
 
+    /// Enables interrupts with `STI` and waits with `HLT`.
+    ///
+    /// `STI` only takes effect after the instruction that follows it, so no
+    /// interrupt can arrive between the two: one that is already pending
+    /// wakes `HLT` up rather than being handled before it, which would leave
+    /// the core asleep until the next one.
+    ///
+    /// Not `nomem`: the handlers that run while the core waits change memory,
+    /// so the compiler must not keep values in registers across the wait.
+    ///
+    /// # Safety
+    ///
+    /// As for
+    /// [`raw_enable_interrupts`](crate::arch::generic::cpu::CPU::raw_enable_interrupts).
+    #[inline]
+    unsafe fn idle() {
+        unsafe {
+            core::arch::asm!("sti", "hlt", options(nostack));
+        }
+    }
+
     /// Masks maskable interrupts with `CLI` and halts with `HLT`, forever.
     ///
     /// `HLT` alone is not the end: a non-maskable interrupt, a system
@@ -328,6 +380,193 @@ impl crate::arch::generic::cpu::CPU for CPU {
         let len = 0;
 
         &mut call_stack[..len]
+    }
+
+    /// Stores `value` in bits 63 to 48, which four-level paging leaves to
+    /// sign-extend bit 47 and does not translate.
+    ///
+    /// The bits hold `value` XORed with that sign extension, so that a
+    /// canonical address is one carrying `0` in either half: encoding `0`
+    /// gives back a canonical address, and any other value a non-canonical
+    /// one that faults with `#GP` if dereferenced by mistake.
+    fn try_encode<T>(
+        virt_addr: VirtualAddress<T>,
+        value: usize,
+    ) -> Result<VirtualAddress<T>, usize> {
+        if value > MAX_ENCODED_VALUE {
+            return Err(MAX_ENCODED_VALUE);
+        }
+
+        let ptr = virt_addr.as_ptr().map_addr(|addr| {
+            (addr & ADDRESS_MASK) | ((value ^ sign_extension(addr)) << VIRTUAL_ADDRESS_BITS)
+        });
+
+        Ok(VirtualAddress::new(ptr))
+    }
+
+    /// Takes out bits 63 to 48, undoing the XOR with the sign extension of bit
+    /// 47. Every value they can hold is one
+    /// [`try_encode`](crate::arch::generic::cpu::CPU::try_encode) accepts, so
+    /// this never fails.
+    fn try_decode<T>(virt_addr: VirtualAddress<T>) -> Result<usize, usize> {
+        let addr = virt_addr.addr();
+        Ok((addr >> VIRTUAL_ADDRESS_BITS) ^ sign_extension(addr))
+    }
+
+    /// Switches stacks through `__context_switch`, see `context_switch.S`.
+    ///
+    /// Both handles cross the switch as raw pointers, so that no count is
+    /// held on the suspended stack. The resumed thread turns the pointers of
+    /// the call that switched to it back into handles.
+    ///
+    /// In the bootloader and the host tests, which have no
+    /// `__context_switch`, this panics.
+    fn context_switch(prev: Arc<Thread>, next: Arc<Thread>) -> Arc<Thread> {
+        #[cfg(all(not(test), not(feature = "library")))]
+        {
+            let prev = Arc::into_raw(prev);
+            let next = Arc::into_raw(next);
+
+            // SAFETY: both pointers come from live handles, and the offset is
+            // that of the saved stack pointer, which `next` holds as left by
+            // its own last switch or by thread setup.
+            let switched = unsafe { __context_switch(prev, next, Thread::KERNEL_STACK_PTR_OFFSET) };
+
+            // SAFETY: the pointers were made by `into_raw` above, in the call
+            // that switched to this thread, and are reclaimed only here.
+            let (prev, next) = unsafe {
+                (
+                    Arc::<Thread>::from_raw(switched.prev),
+                    Arc::<Thread>::from_raw(switched.next),
+                )
+            };
+
+            // `next` is the running thread, which `CURRENT` keeps alive, so
+            // this is never the last handle and needs no token.
+            drop(next);
+
+            prev
+        }
+
+        #[cfg(any(test, feature = "library"))]
+        {
+            // Forgotten rather than dropped: the last handle must not be.
+            core::mem::forget((prev, next));
+            panic!("context_switch() is only available in the kernel");
+        }
+    }
+
+    /// One past the end of this core's `BOOT_STACK`, see `init.rs`.
+    ///
+    /// In the bootloader and the host tests, which have no boot stacks, this
+    /// panics.
+    fn boot_stack_top() -> VirtualAddress<c_void> {
+        #[cfg(all(not(test), not(feature = "library")))]
+        {
+            crate::arch::x86_64::init::BOOT_STACK.with(|stack| {
+                let top = core::ptr::from_ref(stack).wrapping_add(1);
+                VirtualAddress::new(top.cast::<c_void>().cast_mut())
+            })
+        }
+
+        #[cfg(any(test, feature = "library"))]
+        panic!("boot_stack_top() is only available in the kernel");
+    }
+
+    /// Lays out the top of the kernel stack as `__context_switch` leaves a
+    /// suspended thread, see `context_switch.S`:
+    ///
+    /// ```text
+    /// top - 8   __thread_trampoline   return address
+    /// top - 16  0                     %r15
+    /// top - 24  0                     %r14
+    /// top - 32  arg                   %r13
+    /// top - 40  entry                 %r12
+    /// top - 48  CALL_STACK_END_MARKER %rbp
+    /// top - 56  0                     %rbx  <- saved stack pointer
+    /// ```
+    ///
+    /// The first switch pops the registers and returns into the trampoline
+    /// with `%rsp` at `top`, which is 16-byte aligned, so the trampoline can
+    /// call `thread_entry` as the ABI requires. `thread_entry` saves the
+    /// [`CALL_STACK_END_MARKER`] in `%rbp` as its caller's frame, which makes
+    /// it the outermost frame on the thread's stack, as `head.S` does for a
+    /// boot stack.
+    ///
+    /// In the bootloader and the host tests, which have no trampoline, the
+    /// return address is left zero: no thread is switched to there.
+    fn context_prepare(thread: &mut Thread, entry: ThreadEntry, arg: usize) {
+        match thread.ty() {
+            ThreadType::Idle | ThreadType::Kernel => {
+                #[cfg(all(not(test), not(feature = "library")))]
+                let trampoline = __thread_trampoline as *const () as usize as u64;
+
+                #[cfg(any(test, feature = "library"))]
+                let trampoline = 0u64;
+
+                // Lowest address first, in the order `__context_switch` pops.
+                let frame: [u64; 7] = [
+                    0,
+                    CALL_STACK_END_MARKER,
+                    entry as usize as u64,
+                    arg as u64,
+                    0,
+                    0,
+                    trampoline,
+                ];
+
+                let kernel_stack = thread.kernel_stack();
+                assert!(kernel_stack.len() % mem::size_of::<u64>() == 0);
+                assert!(
+                    kernel_stack
+                        .as_ptr()
+                        .addr()
+                        .is_multiple_of(mem::align_of::<u64>())
+                );
+                assert!(
+                    kernel_stack
+                        .as_ptr_range()
+                        .end
+                        .addr()
+                        .is_multiple_of(Self::STACK_ALIGNMENT)
+                );
+
+                let len = kernel_stack.len() / mem::size_of::<u64>();
+                // SAFETY: the stack is the thread's own, aligned for `u64` as
+                // asserted above, and spans exactly `len` of them.
+                let kernel_stack = unsafe {
+                    core::slice::from_raw_parts_mut(kernel_stack.as_mut_ptr().cast::<u64>(), len)
+                };
+
+                let slots = &mut kernel_stack[len - frame.len()..];
+                slots.copy_from_slice(&frame);
+
+                let stack_ptr = VirtualAddress::new(slots.as_mut_ptr().cast::<c_void>());
+                thread.set_kernel_stack_ptr(stack_ptr);
+            }
+            ThreadType::User => todo!(),
+        }
+    }
+}
+
+/// Bits of a virtual address four-level paging translates. Bits 63 to 48 have
+/// to be copies of bit 47.
+const VIRTUAL_ADDRESS_BITS: u32 = 48;
+
+/// Selects the translated bits of a virtual address.
+const ADDRESS_MASK: usize = (1 << VIRTUAL_ADDRESS_BITS) - 1;
+
+/// Largest value [`try_encode`](crate::arch::generic::cpu::CPU::try_encode)
+/// can store in the bits above [`VIRTUAL_ADDRESS_BITS`].
+const MAX_ENCODED_VALUE: usize = usize::MAX >> VIRTUAL_ADDRESS_BITS;
+
+/// What bits 63 to 48 of `addr` hold if it is canonical, shifted down: all
+/// ones in the upper half, all zeros in the lower one.
+const fn sign_extension(addr: usize) -> usize {
+    if addr & (1 << (VIRTUAL_ADDRESS_BITS - 1)) != 0 {
+        MAX_ENCODED_VALUE
+    } else {
+        0
     }
 }
 
@@ -678,4 +917,72 @@ extern "C" fn __interrupt_handler(vector: u64, state: *mut InterruptStackFrame) 
     let vector = InterruptVector::from_raw(vector as _);
 
     handler(vector, state);
+}
+
+#[cfg(test)]
+mod tests {
+    use core::ptr;
+
+    use crate::arch::generic::cpu::CPU as _;
+
+    use super::*;
+
+    /// An address in the lower half, such as a user or host-test one.
+    const LOWER: usize = 0x0000_7fff_dead_b000;
+
+    /// An address in the upper half, such as a kernel one.
+    const UPPER: usize = 0xffff_8000_dead_b000;
+
+    fn address(addr: usize) -> VirtualAddress<u64> {
+        VirtualAddress::new(ptr::without_provenance_mut(addr))
+    }
+
+    #[test]
+    fn canonical_addresses_carry_zero() {
+        for addr in [0, LOWER, UPPER, usize::MAX] {
+            assert_eq!(CPU::try_decode(address(addr)), Ok(0));
+        }
+    }
+
+    #[test]
+    fn round_trips_every_half() {
+        for addr in [LOWER, UPPER] {
+            for value in [0, 1, 0x1234, MAX_ENCODED_VALUE] {
+                let encoded = CPU::try_encode(address(addr), value).unwrap();
+                assert_eq!(CPU::try_decode(encoded), Ok(value));
+
+                // The address bits are untouched, and encoding `0` restores
+                // the canonical address.
+                assert_eq!(encoded.addr() & ADDRESS_MASK, addr & ADDRESS_MASK);
+                let plain = CPU::try_encode(encoded, 0).unwrap();
+                assert_eq!(plain.addr(), addr);
+            }
+        }
+    }
+
+    #[test]
+    fn encoding_replaces_the_previous_value() {
+        let once = CPU::try_encode(address(UPPER), 7).unwrap();
+        let twice = CPU::try_encode(once, 9).unwrap();
+        assert_eq!(CPU::try_decode(twice), Ok(9));
+    }
+
+    #[test]
+    fn values_beyond_the_spare_bits_are_refused() {
+        assert_eq!(MAX_ENCODED_VALUE, 0xffff);
+        assert_eq!(
+            CPU::try_encode(address(LOWER), MAX_ENCODED_VALUE + 1).map(|addr| addr.addr()),
+            Err(MAX_ENCODED_VALUE)
+        );
+    }
+
+    #[test]
+    fn keeps_provenance() {
+        let mut value = 42u64;
+        let addr = VirtualAddress::from_mut(&mut value);
+
+        let encoded = CPU::try_encode(addr, 3).unwrap();
+        let plain = CPU::try_encode(encoded, 0).unwrap();
+        assert_eq!(unsafe { plain.read() }, 42);
+    }
 }

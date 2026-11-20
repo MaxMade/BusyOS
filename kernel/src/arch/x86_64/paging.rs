@@ -15,8 +15,20 @@ use crate::{
     kernel::{
         bootinfo::Bootinfo,
         locking::{CanAcquire, PreviousToken, level},
+        ticketlock::{MemoryManagementTicketlock, Ticketlock},
     },
+    mem::page_frames::EarlyPageFrames,
 };
+
+/// The kernel's page tables, once the boot core has built them with
+/// [`Paging::kernel_mapping`] and activated them, and `None` before.
+///
+/// Every core runs on them: the other cores load the boot core's `CR3` while
+/// they come up. They are kept for good, and never destroyed, so that nothing
+/// ever drops them, which [`Paging`] does not allow. Their frames come from
+/// [`EarlyPageFrames`], which is why that is their allocator type.
+pub static KERNEL_PAGING: MemoryManagementTicketlock<Option<Paging<EarlyPageFrames>>> =
+    MemoryManagementTicketlock::new(Ticketlock::new(), None);
 
 /// Number of bits to shift a page frame number to obtain a physical address
 /// for a regular (4 KiB) page.
@@ -2944,7 +2956,7 @@ mod test {
 
     use nix::sys::mman::{MapFlags, ProtFlags};
 
-    use crate::kernel::locking::{RootToken, SyscallLevel};
+    use crate::kernel::locking::{EpilogueLevel, RootToken};
 
     use super::*;
 
@@ -3053,7 +3065,7 @@ mod test {
     fn map_resolve_4k() {
         // Enter syscall level
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         // Track page frames
         let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
@@ -3122,7 +3134,7 @@ mod test {
         let token = unsafe { paging.destroy(pf_cb, token) };
 
         // Leave syscall level
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
 
         // Check if no page frames were leaked
         assert!(!TestPageFrameAllocator::leaked());
@@ -3132,7 +3144,7 @@ mod test {
     fn map_resolve_2m() {
         // Enter syscall level
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         // Track page frames
         let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
@@ -3206,7 +3218,7 @@ mod test {
         let token = unsafe { paging.destroy(pf_cb, token) };
 
         // Leave syscall level
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
 
         // Check if no page frames were leaked
         assert!(!TestPageFrameAllocator::leaked());
@@ -3215,7 +3227,7 @@ mod test {
     #[test]
     fn map_resolve_1g() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
@@ -3258,14 +3270,14 @@ mod test {
             token
         };
         let token = unsafe { paging.destroy(pf_cb, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn resolve_empty() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let addr = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
@@ -3277,14 +3289,14 @@ mod test {
 
         // destroy an empty hierarchy (no PML4 allocated yet)
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn resolve_unmapped_address() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
@@ -3319,14 +3331,14 @@ mod test {
                 token,
             )
         };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn map_unmap_4k() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
@@ -3364,14 +3376,14 @@ mod test {
         }
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn map_unmap_2m() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Huge);
@@ -3407,14 +3419,14 @@ mod test {
         }
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn map_unmap_1g() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Gigantic);
@@ -3450,14 +3462,14 @@ mod test {
         }
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn unmap_not_mapped() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
@@ -3483,7 +3495,7 @@ mod test {
         match unsafe { paging.unmap(virt_b, token) } {
             Err((PagingError::NotMapped, t)) => {
                 let token = unsafe { paging.destroy(|_, _, t| t, t) };
-                syscall_level.leave(token);
+                epilogue_level.leave(token);
             }
             Ok(_) => panic!("Expected NotMapped, got Ok"),
             Err((e, _)) => panic!("Expected NotMapped, got {}", e),
@@ -3495,7 +3507,7 @@ mod test {
     #[test]
     fn conflict_regular_then_gigantic() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
@@ -3533,7 +3545,7 @@ mod test {
         } {
             Err((PagingError::Conflict, t)) => {
                 let token = unsafe { paging.destroy(|_, _, t| t, t) };
-                syscall_level.leave(token);
+                epilogue_level.leave(token);
             }
             Ok(_) => panic!("Expected Conflict, got Ok"),
             Err((e, _)) => panic!("Expected Conflict, got {}", e),
@@ -3545,7 +3557,7 @@ mod test {
     #[test]
     fn conflict_huge_then_regular() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
@@ -3581,7 +3593,7 @@ mod test {
         } {
             Err((PagingError::Conflict, t)) => {
                 let token = unsafe { paging.destroy(|_, _, t| t, t) };
-                syscall_level.leave(token);
+                epilogue_level.leave(token);
             }
             Ok(_) => panic!("Expected Conflict, got Ok"),
             Err((e, _)) => panic!("Expected Conflict, got {}", e),
@@ -3593,7 +3605,7 @@ mod test {
     #[test]
     fn remap_4k_returns_old_frame() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
@@ -3654,14 +3666,14 @@ mod test {
         }
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn remap_2m_returns_old_frame() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
@@ -3707,14 +3719,14 @@ mod test {
         };
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn access_rights_read_only_kernel() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
@@ -3747,14 +3759,14 @@ mod test {
         }
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn access_rights_executable_user() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
@@ -3787,14 +3799,14 @@ mod test {
         }
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn multiple_4k_mappings() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let mut token = token;
@@ -3866,14 +3878,14 @@ mod test {
         }
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn mixed_page_sizes() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
@@ -3926,14 +3938,14 @@ mod test {
             token
         };
         let token = unsafe { paging.destroy(pf_cb, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn double_unmap_returns_not_mapped() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
@@ -3964,7 +3976,7 @@ mod test {
         match unsafe { paging.unmap(virt, token) } {
             Err((PagingError::NotMapped, t)) => {
                 let token = unsafe { paging.destroy(|_, _, t| t, t) };
-                syscall_level.leave(token);
+                epilogue_level.leave(token);
             }
             Ok(_) => panic!("Expected NotMapped on second unmap, got Ok"),
             Err((e, _)) => panic!("Expected NotMapped, got {}", e),
@@ -3976,7 +3988,7 @@ mod test {
     #[test]
     fn destroy_invokes_callback_for_each_leaf() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let mut token = token;
@@ -4022,14 +4034,14 @@ mod test {
             "destroy callback set differs from mapped frames"
         );
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn privilege_level_kernel() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
         let virt = TestPageFrameAllocator::next_virtual_addr(PageSize::Regular);
@@ -4056,14 +4068,14 @@ mod test {
         }
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn map_non_canonical() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
@@ -4090,14 +4102,14 @@ mod test {
         };
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn unmap_non_canonical() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let mut paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
@@ -4119,14 +4131,14 @@ mod test {
         };
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
     #[test]
     fn resolve_non_canonical() {
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let paging: Paging<TestPageFrameAllocator> = Paging::new(VIRT_PHYS_SHIFT);
 
@@ -4140,7 +4152,7 @@ mod test {
         };
 
         let token = unsafe { paging.destroy(|_, _, t| t, token) };
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
         assert!(!TestPageFrameAllocator::leaked());
     }
 
@@ -4319,7 +4331,7 @@ mod test {
     fn a_mapping_keeps_the_caching_mode_it_was_made_with() {
         // Enter syscall level
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, mut token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, mut token) = EpilogueLevel::enter(root_token);
 
         // Track page frames
         let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
@@ -4391,7 +4403,7 @@ mod test {
         let token = unsafe { paging.destroy(pf_cb, token) };
 
         // Leave syscall level
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
 
         // Check if no page frames were leaked
         assert!(!TestPageFrameAllocator::leaked());
@@ -4403,7 +4415,7 @@ mod test {
     fn the_tables_on_the_way_stay_cacheable() {
         // Enter syscall level
         let root_token = unsafe { RootToken::forge() };
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         // Track page frames
         let mut page_frames: HashMap<PhysicalAddress<c_void>, PageSize> = HashMap::new();
@@ -4461,7 +4473,7 @@ mod test {
         let token = unsafe { paging.destroy(pf_cb, token) };
 
         // Leave syscall level
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
 
         // Check if no page frames were leaked
         assert!(!TestPageFrameAllocator::leaked());

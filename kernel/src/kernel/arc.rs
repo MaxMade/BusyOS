@@ -36,7 +36,7 @@ use core::alloc::Layout;
 use core::borrow::Borrow;
 use core::fmt;
 use core::marker::{PhantomData, Unsize};
-use core::mem::ManuallyDrop;
+use core::mem::{self, ManuallyDrop, offset_of};
 use core::ops::{CoerceUnsized, Deref};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering, fence};
@@ -62,6 +62,11 @@ const MAX_REFCOUNT: usize = isize::MAX as usize;
 /// stays a single pointer, cloning one needs nothing from the allocator, and
 /// the block is always freed by the very allocator it came from. `data` comes
 /// last, which is what allows `T` to be unsized.
+///
+/// `repr(C)` pins the field order, so that the offset of `data` depends only
+/// on `A` and the alignment of the value — [`Arc::from_raw`] relies on that to
+/// find its way back from the value to the block.
+#[repr(C)]
 struct ArcInner<T: ?Sized, A: Allocator<MemoryManagementLevelID>> {
     /// Number of live handles on this allocation.
     strong: AtomicUsize,
@@ -224,6 +229,53 @@ impl<T, A: Allocator<MemoryManagementLevelID>> Arc<T, A> {
 
         Ok((value, token))
     }
+
+    /// Gives up this handle, handing the value back if it was the last one.
+    ///
+    /// Like [`release`](Arc::release), except that the last handle gets the
+    /// value instead of having it dropped; the allocation is freed either way.
+    /// Unlike [`try_unwrap`](Arc::try_unwrap), the handle is always given up,
+    /// so of all the handles given up this way, however many at once, exactly
+    /// one gets the value.
+    ///
+    /// # Token
+    ///
+    /// The `token` is consumed and returned.
+    pub fn into_inner<Token>(this: Self, token: Token) -> (Option<T>, Token)
+    where
+        Token: CanAcquire<<MemoryManagementLevelID as LockId>::Level> + PreviousToken,
+    {
+        // The count is decremented right here, so `Drop` must not run and do
+        // it a second time.
+        let this = ManuallyDrop::new(this);
+
+        // `Release`, as in `release`, so that everything this owner wrote to
+        // the value is visible to whoever ends up with it.
+        if this.inner().strong.fetch_sub(1, AtomicOrdering::Release) != 1 {
+            return (None, token);
+        }
+
+        // This handle was the last one. The fence pairs with the `Release`
+        // above of every other handle.
+        fence(AtomicOrdering::Acquire);
+
+        let inner = this.ptr;
+        let layout = Layout::new::<ArcInner<T, A>>();
+
+        // SAFETY: as in `try_unwrap`: the count reached zero, so both moves
+        // take their field for good.
+        let (value, alloc) = unsafe {
+            (
+                ptr::read(&inner.as_ref().data),
+                ptr::read(&inner.as_ref().alloc),
+            )
+        };
+
+        // SAFETY: as in `try_unwrap`.
+        let token = unsafe { alloc.deallocate(inner.cast::<u8>(), layout, token) };
+
+        (Some(value), token)
+    }
 }
 
 impl<T> Arc<T, Heap> {
@@ -311,6 +363,57 @@ impl<T: ?Sized, A: Allocator<MemoryManagementLevelID>> Arc<T, A> {
     #[inline]
     pub fn allocator(&self) -> &A {
         &self.inner().alloc
+    }
+
+    /// Turns this handle into a raw pointer to the value.
+    ///
+    /// The handle's strong count is not given up: it travels with the pointer
+    /// until [`from_raw`](Arc::from_raw) turns it back into a handle, so the
+    /// value stays alive and the pointer valid in between. Never calling
+    /// `from_raw` leaks the value.
+    #[inline]
+    pub fn into_raw(this: Self) -> *const T {
+        // The count moves into the pointer, so `Drop` must not decrement it.
+        let this = ManuallyDrop::new(this);
+
+        // SAFETY: the handle is live, so the allocation is too. No reference
+        // is created, only a pointer to the field.
+        unsafe { &raw const (*this.ptr.as_ptr()).data }
+    }
+
+    /// Turns a pointer from [`into_raw`](Arc::into_raw) back into a handle.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must have been returned by [`Arc::into_raw`] on an `Arc<U, A>`
+    /// with the same allocator type `A`, where `U` is `T` or a sized type that
+    /// `T` was coerced from (e.g. `[u8; 3]` for `[u8]`). Each such pointer
+    /// carries exactly one strong count and must be turned back into a handle
+    /// at most once.
+    #[inline]
+    pub unsafe fn from_raw(ptr: *const T) -> Self {
+        // SAFETY: per the caller's promise the pointer still carries a strong
+        // count, so the value behind it is live and may be borrowed to read
+        // its alignment.
+        let align = mem::align_of_val(unsafe { &*ptr });
+
+        // `repr(C)` lays the fields out one after the other, so `data` starts
+        // at the end of `alloc`, rounded up to the alignment of the value. The
+        // header is identical for every `T`, so `ArcInner<(), A>` has it too.
+        let offset =
+            (offset_of!(ArcInner<(), A>, alloc) + mem::size_of::<A>()).next_multiple_of(align);
+
+        // SAFETY: `ptr` points `offset` bytes into the block it came from, so
+        // stepping back stays inside it and lands on the start of the inner.
+        // The cast keeps the pointer metadata, which `ArcInner<T, A>` shares
+        // with `T`.
+        let inner = unsafe { ptr.byte_sub(offset) } as *mut ArcInner<T, A>;
+
+        Self {
+            // SAFETY: the start of a live allocation is never null.
+            ptr: unsafe { NonNull::new_unchecked(inner) },
+            phantom: PhantomData,
+        }
     }
 
     /// Returns a mutable borrow of the value if this is the only handle on it,
@@ -605,6 +708,70 @@ mod tests {
 
         let token = second.release(token);
         let token = first.release(token);
+        level.leave(token);
+    }
+
+    /// A handle survives the trip through a raw pointer with its count intact.
+    #[test]
+    fn into_raw_and_from_raw_round_trip() {
+        let root = unsafe { RootToken::forge() };
+        let (level, token) = EpilogueLevel::enter(root);
+
+        let (arc, token) = new_arc!(0x1234_5678u32, token);
+        let second = arc.clone();
+
+        let ptr = Arc::into_raw(arc);
+        assert_eq!(unsafe { *ptr }, 0x1234_5678);
+        assert_eq!(second.strong_count(), 2);
+
+        let arc = unsafe { Arc::<u32, HeapAllocator>::from_raw(ptr) };
+        assert!(Arc::ptr_eq(&arc, &second));
+        assert_eq!(arc.strong_count(), 2);
+
+        let token = second.release(token);
+        let token = arc.release(token);
+        level.leave(token);
+    }
+
+    /// The way back from the value to the block also works for an unsized
+    /// value, whose offset is only known at runtime.
+    #[test]
+    fn from_raw_finds_the_block_of_an_unsized_value() {
+        let root = unsafe { RootToken::forge() };
+        let (level, token) = EpilogueLevel::enter(root);
+
+        let (arc, token) = new_arc!([1u64, 2, 3], token);
+        let arc: Arc<[u64], HeapAllocator> = arc;
+        let second = arc.clone();
+
+        let ptr = Arc::into_raw(arc);
+        let arc = unsafe { Arc::<[u64], HeapAllocator>::from_raw(ptr) };
+
+        assert!(Arc::ptr_eq(&arc, &second));
+        assert_eq!(*arc, [1, 2, 3]);
+        assert_eq!(arc.strong_count(), 2);
+
+        let token = second.release(token);
+        let token = arc.release(token);
+        level.leave(token);
+    }
+
+    /// Only the last handle given up gets the value back.
+    #[test]
+    fn into_inner_returns_the_value_to_the_last_handle() {
+        let root = unsafe { RootToken::forge() };
+        let (level, token) = EpilogueLevel::enter(root);
+
+        let (first, token) = new_arc!(11u32, token);
+        let second = first.clone();
+
+        let (value, token) = Arc::into_inner(first, token);
+        assert_eq!(value, None);
+        assert_eq!(second.strong_count(), 1);
+
+        let (value, token) = Arc::into_inner(second, token);
+        assert_eq!(value, Some(11));
+
         level.leave(token);
     }
 

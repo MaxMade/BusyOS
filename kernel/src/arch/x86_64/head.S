@@ -25,6 +25,12 @@
 #   -32(%rbp)              padding, keeps the frame 16 byte aligned
 .global _start
 _start:
+        # Mask interrupts until the core is ready to schedule, as the
+        # application processors do in `ap_trampoline.S`. UEFI may hand over
+        # with them enabled, and the kernel's own handlers are not in place
+        # yet; the core's idle thread enables them, see `CPU::idle`.
+        cli
+
         # Create function prologue on UEFI stack
         #
         # 32 bytes, a multiple of the 16 byte stack alignment, so that the

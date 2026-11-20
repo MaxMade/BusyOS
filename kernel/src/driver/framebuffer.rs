@@ -1,7 +1,5 @@
 use core::{convert::Infallible, ffi::c_void};
 
-use crate::kernel::ticketlock::{DriverTicketlock, Ticketlock};
-
 use driver_macro::module;
 use embedded_graphics::{
     Drawable,
@@ -24,7 +22,7 @@ use crate::{
     kernel::{
         arc::Arc,
         bootinfo::BOOTINFO,
-        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken},
+        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken, mutex::DriverMutex},
     },
     mem::page_frames::PageFrames,
     user::errno::Errno,
@@ -292,7 +290,7 @@ impl DrawTarget for Canvas<'_> {
 }
 
 pub struct Framebuffer {
-    state: DriverTicketlock<State>,
+    state: DriverMutex<State>,
     configuration: Configuration,
 }
 
@@ -361,7 +359,7 @@ impl Module for Framebuffer {
         state.clear(&configuration);
 
         let driver = Self {
-            state: DriverTicketlock::new(Ticketlock::new(), state),
+            state: DriverMutex::new(state),
             configuration,
         };
         let driver = match Arc::try_new(driver, token) {

@@ -9,8 +9,10 @@ use crate::{
     kernel::{
         arc::Arc,
         linked_list::LinkedList,
-        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken, ReadGuard, Shared, Token},
-        ticketlock::{DriverRWTicketlock, RWTicketlock, RWTicketlockDriverID},
+        locking::{
+            CanAcquire, DriverLevelID, Exclusive, LockId, PreviousToken, Token,
+            mutex::{DriverMutex, MutexDriverID, MutexGuard},
+        },
     },
     user::errno::{Errno, ToErrno},
 };
@@ -178,7 +180,7 @@ impl Consoles {
 
     /// Walks every registered console, in the order they registered.
     ///
-    /// The returned [`ConsolesIter`] holds [`CONSOLES`] shared for as long as
+    /// The returned [`ConsolesIter`] holds [`CONSOLES`] for as long as
     /// it lives, so no console can register in the meantime, and yields a
     /// clone of each handle rather than a reference into the list.
     ///
@@ -191,7 +193,7 @@ impl Consoles {
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
-        let (consoles, token) = CONSOLES.acquire_shared(token);
+        let (consoles, token) = CONSOLES.acquire(token);
 
         ConsolesIter {
             consoles,
@@ -214,7 +216,7 @@ impl Consoles {
     {
         // TODO(@MaxMade): Pick the console named by the build configuration
         // or the kernel command line, once either exists.
-        let (consoles, token) = CONSOLES.acquire_shared(token);
+        let (consoles, token) = CONSOLES.acquire(token);
         let driver = consoles.0.front().cloned();
 
         (driver, consoles.release(token))
@@ -248,8 +250,8 @@ pub struct ConsolesIter<From>
 where
     From: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
 {
-    consoles: ReadGuard<'static, Consoles, RWTicketlock<RWTicketlockDriverID>>,
-    token: Token<RWTicketlockDriverID, From, Shared>,
+    consoles: MutexGuard<'static, Consoles, MutexDriverID>,
+    token: Token<MutexDriverID, From, Exclusive>,
     next: usize,
 }
 
@@ -281,5 +283,4 @@ where
 }
 
 /// The one list of registered consoles.
-pub static CONSOLES: DriverRWTicketlock<Consoles> =
-    DriverRWTicketlock::new(RWTicketlock::new(), Consoles(LinkedList::new()));
+pub static CONSOLES: DriverMutex<Consoles> = DriverMutex::new(Consoles(LinkedList::new()));

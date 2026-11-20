@@ -16,8 +16,7 @@ use bitfield_struct::bitfield;
 use crate::{
     arch::x86_64::io::IOB,
     kernel::{
-        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken},
-        ticketlock::{DriverTicketlock, Ticketlock},
+        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken, mutex::DriverMutex},
         time::MilliSeconds,
     },
     user::errno::Errno,
@@ -199,7 +198,7 @@ type ControlPort = IOB<0x61, Control>;
 /// can never be held at once.
 ///
 /// [`level::Driver`]: crate::kernel::locking::level::Driver
-static CHIP: DriverTicketlock<PIT> = DriverTicketlock::new(Ticketlock::new(), PIT);
+static CHIP: DriverMutex<PIT> = DriverMutex::new(PIT);
 
 /// The PIT, as the value its one lock guards.
 ///

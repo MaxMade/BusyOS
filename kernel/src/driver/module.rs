@@ -3,8 +3,7 @@ use crate::{
     kernel::{
         arc::Arc,
         linked_list::LinkedList,
-        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken},
-        ticketlock::{DriverRWTicketlock, RWTicketlock},
+        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken, mutex::DriverMutex},
     },
     user::errno::{Errno, ToErrno},
 };
@@ -20,8 +19,7 @@ use crate::driver::x86_64::x2apic::X2Apic;
 pub struct Modules(LinkedList<ModuleDriver>);
 
 /// The one list of registered drivers.
-pub static MODULES: DriverRWTicketlock<Modules> =
-    DriverRWTicketlock::new(RWTicketlock::new(), Modules(LinkedList::new()));
+pub static MODULES: DriverMutex<Modules> = DriverMutex::new(Modules(LinkedList::new()));
 
 unsafe extern "C" {
     /// First entry of the `init_modules_callbacks` array the linker script

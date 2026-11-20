@@ -8,8 +8,8 @@ use kernel_derive::lock_id;
 use crate::kernel::locking::{HierarchicalLock, Lock, LockId, level};
 use crate::kernel::prologue_lock::PrologueLock;
 
-#[lock_id(Driver)]
-pub struct TicketlockDriverID;
+#[lock_id(Scheduler)]
+pub struct TicketlockSchedulerID;
 
 #[lock_id(Thread)]
 pub struct TicketlockThreadID;
@@ -85,13 +85,12 @@ impl<Id: LockId> HierarchicalLock for Ticketlock<Id> {
     }
 }
 
-/// Driver-level ticketlock.
+/// Scheduler-level ticketlock.
 ///
-/// TODO(@MaxMade): a lock at [`level::Driver`] is meant to be a blocking
-/// lock — a driver sleeps while it waits for its device — and none exists
-/// yet, so this spinning one stands in. Until it is replaced, a hold must
-/// not sleep: every waiter spins for as long as it does.
-pub type DriverTicketlock<T> = Lock<T, Ticketlock<TicketlockDriverID>>;
+/// [`level::Scheduler`] is the boundary between blocking and spinning locks:
+/// sleeping *is* acquiring this level, so a hold may not sleep, and the
+/// scheduler may take a thread lock while it holds this one.
+pub type SchedulerTicketlock<T> = Lock<T, Ticketlock<TicketlockSchedulerID>>;
 
 /// Thread-level ticketlock.
 ///
@@ -107,8 +106,8 @@ pub type MemoryTicketlock<T> = Lock<T, Ticketlock<TicketlockMemoryID>>;
 /// Prologue-level ticketlock. Masks interrupts for the duration of the hold.
 pub type PrologueTicketlock<T> = PrologueLock<T, Ticketlock<TicketlockPrologueID>>;
 
-#[lock_id(Driver)]
-pub struct RWTicketlockDriverID;
+#[lock_id(Scheduler)]
+pub struct RWTicketlockSchedulerID;
 
 #[lock_id(Thread)]
 pub struct RWTicketlockThreadID;
@@ -283,13 +282,10 @@ impl<Id: LockId> HierarchicalLock for RWTicketlock<Id> {
     }
 }
 
-/// Driver-level reader-writer ticketlock.
+/// Scheduler-level reader-writer ticketlock.
 ///
-/// TODO(@MaxMade): a lock at [`level::Driver`] is meant to be a blocking
-/// lock — a driver sleeps while it waits for its device — and none exists
-/// yet, so this spinning one stands in. Until it is replaced, a hold must
-/// not sleep: every waiter spins for as long as it does.
-pub type DriverRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockDriverID>>;
+/// As [`SchedulerTicketlock`], a spinning lock: see [`level::Scheduler`].
+pub type SchedulerRWTicketlock<T> = Lock<T, RWTicketlock<RWTicketlockSchedulerID>>;
 
 /// Thread-level reader-writer ticketlock.
 ///
@@ -312,7 +308,7 @@ mod test {
     };
 
     use crate::kernel::locking::{
-        CanAcquire, DriverLevel, EpilogueLevel, PreviousToken, RootToken, SyscallLevel,
+        CanAcquire, DriverLevel, EpilogueLevel, PreviousToken, RootToken,
     };
 
     use super::*;
@@ -323,7 +319,7 @@ mod test {
     fn usage_exclusive() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let epilogue = MemoryManagementTicketlock::new(Ticketlock::new(), 0);
 
@@ -337,14 +333,14 @@ mod test {
 
         let token = epilogue_guard.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     #[test]
     fn usage_shared() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let epilogue = MemoryManagementRWTicketlock::new(RWTicketlock::new(), 0);
 
@@ -362,7 +358,7 @@ mod test {
 
         let token = epilogue_guard_0.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     fn do_memory_work<From>(token: From) -> From
@@ -379,7 +375,7 @@ mod test {
     fn usage_exclusive_subroutine() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let epilogue = MemoryManagementTicketlock::new(Ticketlock::new(), 0);
 
@@ -389,14 +385,14 @@ mod test {
 
         let token = epilogue_guard.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     #[test]
     fn usage_shared_subroutine() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let epilogue = MemoryManagementRWTicketlock::new(RWTicketlock::new(), 0);
 
@@ -406,7 +402,7 @@ mod test {
 
         let token = epilogue_guard.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     #[test]
@@ -514,7 +510,7 @@ mod test {
     fn usage_try_exclusive() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let lock = MemoryManagementTicketlock::new(Ticketlock::new(), 0);
 
@@ -528,7 +524,7 @@ mod test {
             .unwrap_or_else(|_| panic!("lock was released"));
         let token = guard.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     /// As `usage_try_exclusive`, in shared mode: the token handed out still
@@ -537,7 +533,7 @@ mod test {
     fn usage_try_shared() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (syscall_level, token) = SyscallLevel::enter(root_token);
+        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
 
         let shared = MemoryManagementRWTicketlock::new(RWTicketlock::new(), 0);
         let memory = MemoryRWTicketlock::new(RWTicketlock::new(), 0);
@@ -556,7 +552,7 @@ mod test {
         let token = nested_guard.release(token);
         let token = shared_guard.release(token);
 
-        syscall_level.leave(token);
+        epilogue_level.leave(token);
     }
 
     /// Runs `attempt` on this thread while another thread holds `lock`.
@@ -751,24 +747,24 @@ mod test {
         assert!(*counter.get_mut() == acquired);
     }
 
-    /// The `Driver` level sits between `Epilogue` and `MemoryManagement`, and
-    /// a ticketlock is available at it like at the levels below.
+    /// The `Scheduler` level sits below `Driver`, and a ticketlock is
+    /// available at it like at the levels below.
     #[test]
-    fn usage_driver_level() {
+    fn usage_scheduler_level() {
         let root_token = unsafe { RootToken::forge() };
 
-        let (epilogue_level, token) = EpilogueLevel::enter(root_token);
+        let (driver_level, token) = DriverLevel::enter(root_token);
 
-        let driver = DriverTicketlock::new(Ticketlock::new(), 0);
-        let memory_management = MemoryManagementRWTicketlock::new(RWTicketlock::new(), 0);
+        let scheduler = SchedulerTicketlock::new(Ticketlock::new(), 0);
+        let thread = ThreadRWTicketlock::new(RWTicketlock::new(), 0);
 
-        let (driver_guard, token) = driver.acquire(token);
-        let (memory_management_guard, token) = memory_management.acquire(token);
+        let (scheduler_guard, token) = scheduler.acquire(token);
+        let (thread_guard, token) = thread.acquire(token);
 
-        let token = memory_management_guard.release(token);
-        let token = driver_guard.release(token);
+        let token = thread_guard.release(token);
+        let token = scheduler_guard.release(token);
 
-        epilogue_level.leave(token);
+        driver_level.leave(token);
     }
 
     /// The `Thread` level sits below the scheduler, and a ticketlock is

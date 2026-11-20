@@ -7,6 +7,7 @@ use crate::arch::generic::cpu::CPUID;
 use crate::arch::generic::paging::Paging as _;
 use crate::arch::x86_64::gdt::Gdt;
 use crate::arch::x86_64::idt::Idt;
+use crate::arch::x86_64::paging::KERNEL_PAGING;
 use crate::core_local;
 use crate::driver::irq::IRQCapable;
 use crate::driver::module::Modules;
@@ -14,11 +15,8 @@ use crate::driver::timer::{Timer as _, Timers};
 use crate::driver::x86_64::x2apic::X2Apic;
 use crate::kernel::bootinfo::BOOTINFO;
 use crate::kernel::core_local::{PerCPU, init_block_base};
-use crate::kernel::locking::InitLevel;
-use crate::kernel::locking::InitLevelID;
-use crate::kernel::locking::RootToken;
-use crate::kernel::locking::Shared;
-use crate::kernel::locking::Token;
+use crate::kernel::handler::Epilogue;
+use crate::kernel::locking::{Init, RootToken};
 use crate::kernel::printk;
 use crate::kernel::printk::LogLevel;
 use crate::kernel::time::MilliSeconds;
@@ -128,8 +126,23 @@ static RAW_CPUID: AtomicUsize = AtomicUsize::new(0);
 #[unsafe(no_mangle)]
 pub extern "C" fn start() -> i32 {
     let root_token = unsafe { RootToken::forge() };
-    let (init_level, token) = InitLevel::enter(root_token);
 
+    // Start-up runs on the epilogue level, the top of the hierarchy: an
+    // interrupt only runs its prologue, and its epilogue waits until the
+    // level is left. `schedule` hands the level over to the core's first
+    // thread, and the idle thread leaves it, once the core can schedule. The
+    // boot context never leaves it: it ends in `schedule`, which never
+    // returns. Its token is an init one, so that a mutex spins rather than
+    // sleeps, see `InitToken`.
+    let mut epilogue = Epilogue::enter_init(root_token);
+    epilogue.execute(|token| ((), init_boot_core(token)));
+
+    crate::sched::scheduler::schedule(epilogue)
+}
+
+/// Sets up what the boot core needs, for itself and for all the other cores,
+/// and then starts the other cores.
+fn init_boot_core(token: InitToken) -> InitToken {
     // Get current cpu ID
     let (cpu_id, mut token) = CPUID.with_mut(token, |cpuid| {
         let id = CPUID::try_from(RAW_CPUID.fetch_add(1, AtomicOrdering::Relaxed)).unwrap();
@@ -146,13 +159,23 @@ pub extern "C" fn start() -> i32 {
     }
 
     // Setup kernel mapping
-    let (paging, t): (Paging<EarlyPageFrames>, Token<_, _, _>) =
+    let (paging, t): (Paging<EarlyPageFrames>, InitToken) =
         match Paging::kernel_mapping(bootinfo, token) {
             Ok((paging, t)) => (paging, t),
             Err((error, _)) => panic!("Unable to setup kernel mapping: {}", error),
         };
     token = t;
     unsafe { paging.activate() };
+
+    // Kept for good, see `KERNEL_PAGING`: page tables must never be dropped,
+    // and every core keeps running on these.
+    let (mut kernel_paging, t) = KERNEL_PAGING.acquire(token);
+    if let Some(previous) = kernel_paging.replace(paging) {
+        // Forgotten rather than dropped, which would panic on its own.
+        core::mem::forget(previous);
+        panic!("Kernel page tables set up twice");
+    }
+    token = kernel_paging.release(t);
 
     // Prepare page frames
     token = PageFrames::handover_from_early(token);
@@ -173,6 +196,59 @@ pub extern "C" fn start() -> i32 {
     token = Modules::init(token);
 
     // Setup timer
+    token = init_timer(token);
+
+    // Start the other cores, now that everything they rely on is in place
+    crate::arch::x86_64::smp::start_other_cores(token)
+}
+
+/// The token every core starts out with: its root token as an init one, which
+/// the epilogue level, the top of the hierarchy, hands to start-up, see
+/// `start`.
+///
+/// The core does not run threads before `schedule`, so nothing may sleep: a
+/// mutex taken with a token acquired on top of this one spins instead.
+type InitToken = Init<RootToken>;
+
+/// What every core has to set up for itself, the boot core included.
+///
+/// Loads the GDT and IDT the boot core built, since `GDTR` and `IDTR` are
+/// per-core registers, and switches the core's own local APIC into x2APIC
+/// mode, since every core has one of its own.
+///
+/// # Safety
+///
+/// [`Gdt::init`] and [`Idt::init`] must have run, on the boot core, and this
+/// must run once per core, before the core uses its local APIC.
+unsafe fn init_core(token: InitToken) -> InitToken {
+    // SAFETY: the boot core built both tables, see the function's contract.
+    let token = unsafe { Gdt::load(token) };
+    let token = unsafe { Idt::load(token) };
+
+    // A core without x2APIC simply goes on without: the x2APIC driver does
+    // not register then, on the boot core, and nothing else uses it.
+    //
+    // SAFETY: nothing on this core uses its local APIC yet. Once it is in
+    // x2APIC mode, its identifier can be read, and `__init_gs` has set the
+    // core's `CPUID`.
+    if unsafe { X2Apic::enable_local() } {
+        unsafe { X2Apic::record_local_id() };
+    }
+
+    // Counted once it can be reached, so that a panic waits for it to stop
+    crate::driver::ipi::core_online();
+
+    token
+}
+
+/// Starts the calling core's timer, ticking every 10 ms.
+///
+/// Every core does this for itself: a timer such as the local APIC's only
+/// interrupts the core it is set up on. A core that cannot have one logs why
+/// and goes on without.
+fn init_timer(token: InitToken) -> InitToken {
+    let mut token = token;
+
     match Timers::get(token) {
         (Some(timer), t) => {
             let t = match timer.enable_irqs(t) {
@@ -207,45 +283,6 @@ pub extern "C" fn start() -> i32 {
         }
     }
 
-    // Start the other cores, now that everything they rely on is in place
-    token = crate::arch::x86_64::smp::start_other_cores(token);
-
-    init_level.leave(token);
-
-    todo!();
-}
-
-/// The token every core starts out with, at the `Init` level.
-type InitToken = Token<InitLevelID, RootToken, Shared>;
-
-/// What every core has to set up for itself, the boot core included.
-///
-/// Loads the GDT and IDT the boot core built, since `GDTR` and `IDTR` are
-/// per-core registers, and switches the core's own local APIC into x2APIC
-/// mode, since every core has one of its own.
-///
-/// # Safety
-///
-/// [`Gdt::init`] and [`Idt::init`] must have run, on the boot core, and this
-/// must run once per core, before the core uses its local APIC.
-unsafe fn init_core(token: InitToken) -> InitToken {
-    // SAFETY: the boot core built both tables, see the function's contract.
-    let token = unsafe { Gdt::load(token) };
-    let token = unsafe { Idt::load(token) };
-
-    // A core without x2APIC simply goes on without: the x2APIC driver does
-    // not register then, on the boot core, and nothing else uses it.
-    //
-    // SAFETY: nothing on this core uses its local APIC yet. Once it is in
-    // x2APIC mode, its identifier can be read, and `__init_gs` has set the
-    // core's `CPUID`.
-    if unsafe { X2Apic::enable_local() } {
-        unsafe { X2Apic::record_local_id() };
-    }
-
-    // Counted once it can be reached, so that a panic waits for it to stop
-    crate::driver::ipi::core_online();
-
     token
 }
 
@@ -264,19 +301,21 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     // SAFETY: this is the core's first Rust code after `__init_gs`, and it
     // holds no token yet.
     let root_token = unsafe { RootToken::forge() };
-    let (init_level, token) = InitLevel::enter(root_token);
 
-    // SAFETY: the boot core has built the GDT and IDT before starting this
-    // core, and this runs once, before the core uses its local APIC.
-    let token = unsafe { init_core(token) };
+    // On the epilogue level, with an init token, as on the boot core, see
+    // `start`.
+    let mut epilogue = Epilogue::enter_init(root_token);
+    epilogue.execute(|token| {
+        // SAFETY: the boot core has built the GDT and IDT before starting
+        // this core, and this runs once, before the core uses its local APIC.
+        let token = unsafe { init_core(token) };
 
-    let token = printkln!(LogLevel::Info, token, "Core {} is up", cpu_id);
+        let token = printkln!(LogLevel::Info, token, "Core {} is up", cpu_id);
 
-    init_level.leave(token);
+        // The timer the boot core set up for itself only interrupts the boot
+        // core, so this core arms its own.
+        ((), init_timer(token))
+    });
 
-    // TODO(@MaxMade): Give the core work, once there is a scheduler, and a
-    // timer of its own.
-
-    // SAFETY: the core holds nothing that another core could wait for.
-    unsafe { CPU::halt() }
+    crate::sched::scheduler::schedule(epilogue)
 }

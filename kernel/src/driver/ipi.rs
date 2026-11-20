@@ -20,10 +20,10 @@ use crate::{
         arc::Arc,
         linked_list::LinkedList,
         locking::{
-            CanAcquire, DriverLevelID, EpilogueLevelID, LockId, PreviousToken, PrologueLevelID,
-            ReadGuard, Shared, Token,
+            CanAcquire, DriverLevelID, EpilogueLevelID, Exclusive, LockId, PreviousToken,
+            PrologueLevelID, Token,
+            mutex::{DriverMutex, MutexDriverID, MutexGuard},
         },
-        ticketlock::{DriverRWTicketlock, RWTicketlock, RWTicketlockDriverID},
     },
     user::errno::{Errno, ToErrno},
 };
@@ -148,7 +148,7 @@ impl IRQCapable for IPIDriver {
     /// Forwards to the concrete driver, see [`IRQCapable::prologue`].
     fn prologue<Token>(&self, token: Token) -> Result<(bool, Token), (Errno, Token)>
     where
-        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
+        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
     {
         match self {
             #[cfg(target_arch = "x86_64")]
@@ -159,7 +159,7 @@ impl IRQCapable for IPIDriver {
     /// Forwards to the concrete driver, see [`IRQCapable::epilogue`].
     fn epilogue<Token>(&self, token: Token) -> Result<Token, (Errno, Token)>
     where
-        Token: CanAcquire<<PrologueLevelID as LockId>::Level> + PreviousToken,
+        Token: CanAcquire<<EpilogueLevelID as LockId>::Level> + PreviousToken,
     {
         match self {
             #[cfg(target_arch = "x86_64")]
@@ -222,7 +222,7 @@ impl IPIs {
 
     /// Walks every registered driver, in the order they registered.
     ///
-    /// The returned [`IPIsIter`] holds [`IPIS`] shared for as long as it
+    /// The returned [`IPIsIter`] holds [`IPIS`] for as long as it
     /// lives, so no driver can register in the meantime, and yields a clone
     /// of each handle rather than a reference into the list.
     ///
@@ -235,7 +235,7 @@ impl IPIs {
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
-        let (ipis, token) = IPIS.acquire_shared(token);
+        let (ipis, token) = IPIS.acquire(token);
 
         IPIsIter {
             ipis,
@@ -258,7 +258,7 @@ impl IPIs {
     {
         // TODO(@MaxMade): Pick the driver named by the build configuration
         // or the kernel command line, once either exists.
-        let (ipis, token) = IPIS.acquire_shared(token);
+        let (ipis, token) = IPIS.acquire(token);
         let driver = ipis.0.front().cloned();
 
         (driver, ipis.release(token))
@@ -372,8 +372,8 @@ pub struct IPIsIter<From>
 where
     From: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
 {
-    ipis: ReadGuard<'static, IPIs, RWTicketlock<RWTicketlockDriverID>>,
-    token: Token<RWTicketlockDriverID, From, Shared>,
+    ipis: MutexGuard<'static, IPIs, MutexDriverID>,
+    token: Token<MutexDriverID, From, Exclusive>,
     next: usize,
 }
 
@@ -405,5 +405,4 @@ where
 
 /// The one list of registered drivers that can send inter-processor
 /// interrupts.
-pub static IPIS: DriverRWTicketlock<IPIs> =
-    DriverRWTicketlock::new(RWTicketlock::new(), IPIs(LinkedList::new()));
+pub static IPIS: DriverMutex<IPIs> = DriverMutex::new(IPIs(LinkedList::new()));

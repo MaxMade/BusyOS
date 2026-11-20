@@ -12,6 +12,8 @@
 //!   level requires the nested-share count to be zero, while descending
 //!   to lower levels is permitted with outstanding shares.
 //! - Tokens are `!Send`/`!Sync` and cannot be forged in safe code.
+//! - A token from start-up is wrapped as `Init`, which every token
+//!   acquired on top of it carries in its type (`PreviousToken::INIT`).
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -340,14 +342,35 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
             }
         }
 
+        /// A token of system start-up, before the core runs threads: wraps
+        /// the token it stems from, and acquires whatever that one does.
+        ///
+        /// Every token acquired on top of it carries it in its type, see
+        /// [`PreviousToken::INIT`], so that a lock that would otherwise
+        /// sleep can tell and spin instead: nothing can sleep before the
+        /// core schedules.
+        pub struct Init<T>(pub T);
+
+        /// Blanket rule: an init token reaches what the token it wraps
+        /// does.
+        impl<Level, T> Reaches<Level> for Init<T>
+        where
+            T: Reaches<Level>,
+        {}
+
         mod __locking_sealed {
             pub trait Sealed {}
             impl Sealed for super::RootToken {}
+            impl<T: Sealed> Sealed for super::Init<T> {}
             impl<I: super::LockId, P, K> Sealed for super::Token<I, P, K> {}
         }
 
         /// Reconstructs the previous token on release. Sealed.
         pub trait PreviousToken: __locking_sealed::Sealed {
+            /// Whether the token stems from an [`Init`] one, i.e. from
+            /// start-up, before the core runs threads.
+            const INIT: bool;
+
             /// # Safety
             ///
             /// Only callable from release paths, where the previous lock
@@ -357,6 +380,8 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
         }
 
         impl PreviousToken for RootToken {
+            const INIT: bool = false;
+
             unsafe fn forge_previous() -> Self {
                 Self {
                     _private:  (),
@@ -365,7 +390,17 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl<I: LockId, P, K> PreviousToken for Token<I, P, K> {
+        impl<T: PreviousToken> PreviousToken for Init<T> {
+            const INIT: bool = true;
+
+            unsafe fn forge_previous() -> Self {
+                Init(unsafe { T::forge_previous() })
+            }
+        }
+
+        impl<I: LockId, P: PreviousToken, K> PreviousToken for Token<I, P, K> {
+            const INIT: bool = P::INIT;
+
             unsafe fn forge_previous() -> Self {
                 unsafe { Token::forge() }
             }
@@ -698,6 +733,32 @@ pub fn derive_locking(input: TokenStream) -> TokenStream {
             {
                 let token = HierarchicalLockExt::try_acquire(&self.raw, token)?;
                 Ok((WriteGuard { lock: self }, token))
+            }
+
+            /// Exclusive access to a lock another context acquired and
+            /// handed over, without acquiring it again.
+            ///
+            /// For a lock held across a context switch: the thread that took
+            /// it is suspended before it can release it, and the thread that
+            /// runs next takes the hold over. The result is the `(guard,
+            /// token)` pair of [`acquire`](Lock::acquire), released the same
+            /// way.
+            ///
+            /// # Safety
+            ///
+            /// The lock must be held exclusively by a context that will never
+            /// release it itself, and each such hold may be adopted only
+            /// once.
+            pub unsafe fn adopt<From>(
+                &self,
+                _token: From,
+            ) -> (WriteGuard<'_, T, L>, Token<L::Id, From, Exclusive>)
+            where
+                From: CanAcquire<<L::Id as LockId>::Level>,
+            {
+                // SAFETY: per the caller's promise the lock is held, and the
+                // hold is now this caller's alone.
+                (WriteGuard { lock: self }, unsafe { Token::forge() })
             }
 
             /// Shared access. The nested-hold count starts at zero.

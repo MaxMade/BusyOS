@@ -22,13 +22,12 @@ use crate::driver::acpi::rsdp::RSDP;
 use crate::driver::acpi::xsdt::XSDT;
 use crate::driver::module::{ModuleDriver, Modules};
 use crate::kernel::arc::Arc;
-use crate::kernel::ticketlock::{DriverRWTicketlock, RWTicketlock};
 use crate::{
     arch::Paging,
     driver::module::Module,
     kernel::{
         bootinfo::BOOTINFO,
-        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken},
+        locking::{CanAcquire, DriverLevelID, LockId, PreviousToken, mutex::DriverMutex},
     },
     mem::page_frames::PageFrames,
     user::errno::Errno,
@@ -294,8 +293,7 @@ impl Module for Acpi {
 
 /// The ACPI driver, once [`Acpi::init`](Module::init) has run, see
 /// [`Acpi::get`].
-static ACPI: DriverRWTicketlock<Option<Arc<Acpi>>> =
-    DriverRWTicketlock::new(RWTicketlock::new(), None);
+static ACPI: DriverMutex<Option<Arc<Acpi>>> = DriverMutex::new(None);
 
 impl Acpi {
     /// Returns a handle on the ACPI driver, or [`None`] if it has not been
@@ -308,7 +306,7 @@ impl Acpi {
     where
         Token: CanAcquire<<DriverLevelID as LockId>::Level> + PreviousToken,
     {
-        let (handle, token) = ACPI.acquire_shared(token);
+        let (handle, token) = ACPI.acquire(token);
         let driver = handle.clone();
 
         (driver, handle.release(token))
